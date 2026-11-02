@@ -1,0 +1,13 @@
+# Labels are the valuable, hand-made asset: keep the volume if the claim is deleted.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-lexa-admin-data
+  labels:
+    app.kubernetes.io/name: open-lexa-admin
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn-retain
+  resources:
+    requests:
+      storage: 1Gi

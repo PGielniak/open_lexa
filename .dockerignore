@@ -1,0 +1,15 @@
+# Build context is the repository root: docker build -f <component>/build/Dockerfile .
+.env
+.env.*
+.venv/
+.git/
+.pytest_cache/
+**/__pycache__/
+**/*.egg-info/
+**/tests/
+**/tools/
+**/deploy/
+firmware/
+recordings/
+docs/
+uv.lock

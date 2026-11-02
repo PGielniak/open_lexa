@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Ustawienia — Open Lexa admin{% endblock %}
+{% block content %}
+<h1>Ustawienia</h1>
+{% if saved %}<div class="notice ok">Zapisano. Odbiornik przełączy się przy pierwszym nagraniu po kolejnym odczycie ustawień (domyślnie co 30 s).</div>{% endif %}
+{% if error %}<div class="notice bad">{{ error }}</div>{% endif %}
+{% if not stored %}<div class="notice warn">Ustawienia nie zostały jeszcze zapisane: odbiornik używa konfiguracji ze zmiennych środowiskowych (<span class="mono">STT_*</span>), a nagrania z tej strony nie są transkrybowane.</div>{% endif %}
+{% if stored and s.mode != 'dual' %}<div class="notice warn">Zapisany jest tryb pojedynczy (<span class="mono">{{ s.mode }}</span>). Wybierz <strong>dual</strong> i zapisz, aby każde nagranie trafiało jednocześnie do lokalnego Whispera i GPT.</div>{% endif %}
+
+<form method="post" class="panel" id="settings-form">
+  <h2 style="margin-top:0">Rozpoznawanie mowy (STT)</h2>
+  <p class="muted" style="margin-top:0">Tryb <strong>dual</strong> wysyła każde nagranie równolegle do lokalnego Whispera i do chmury. Transkrypcja GPT jest automatycznie zapisywana jako „poprawna”, więc w panelu wystarczy dodać intencję i encje. Tryby pojedyncze są tylko awaryjne (offline / brak klucza).</p>
+  <div>
+    <label class="inline"><input type="radio" name="mode" value="dual"{% if s.mode == 'dual' %} checked{% endif %}> lokalny Whisper + GPT transcribe (zalecane)</label>
+    <label class="inline"><input type="radio" name="mode" value="local"{% if s.mode == 'local' %} checked{% endif %}> tylko lokalny Whisper</label>
+    <label class="inline"><input type="radio" name="mode" value="cloud"{% if s.mode == 'cloud' %} checked{% endif %}> tylko chmura</label>
+  </div>
+
+  <fieldset data-mode="local">
+    <legend>Lokalne Whisper API</legend>
+    <div class="row">
+      <div style="flex-basis:320px"><label for="local_url">URL (OpenAI-compatible, z <span class="mono">/v1</span>)</label>
+        <input type="url" id="local_url" name="local_url" value="{{ s.local_url }}" required></div>
+      <div><label for="local_model">Model</label>
+        <input type="text" id="local_model" name="local_model" value="{{ s.local_model }}"></div>
+    </div>
+  </fieldset>
+
+  <fieldset data-mode="cloud">
+    <legend>Chmura — GPT transcribe</legend>
+    <div class="row">
+      <div style="flex-basis:320px"><label for="cloud_url">Bazowy URL OpenAI-compatible, np. <span class="mono">https://api.openai.com/v1</span>, <span class="mono">https://api.mistral.ai/v1</span></label>
+        <input type="url" id="cloud_url" name="cloud_url" value="{{ s.cloud_url }}" required></div>
+      <div><label for="cloud_model">Model</label>
+        <input type="text" id="cloud_model" name="cloud_model" value="{{ s.cloud_model }}"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex-basis:320px"><label for="cloud_api_key">Klucz API{% if key_hint %} (zapisany: <span class="mono">{{ key_hint }}</span>; puste pole zostawia obecny){% endif %}</label>
+        <input type="password" id="cloud_api_key" name="cloud_api_key" autocomplete="off" placeholder="{{ 'bez zmian' if key_hint else 'sk-…' }}"></div>
+      {% if key_hint %}<div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="clear_api_key" value="1"> usuń klucz</label></div>{% endif %}
+    </div>
+  </fieldset>
+
+  <div class="row" style="margin-top:12px">
+    <div style="flex:0 1 200px"><label for="language">Język (kod ISO lub <span class="mono">auto</span>)</label>
+      <input type="text" id="language" name="language" value="{{ s.language }}"></div>
+  </div>
+
+  <p class="muted" style="font-size:13px">Ustawienia trafiają do <span class="mono">_config/stt.json</span> na udziale SMB (razem z kluczem API), skąd czyta je odbiornik. Parametry <span class="mono">--backend</span>/<span class="mono">--model</span> odbiornika mają pierwszeństwo.</p>
+  <button class="primary">Zapisz</button>
+</form>
+
+<script>
+(() => {
+  const form = document.getElementById('settings-form');
+  function refresh() {
+    const mode = form.querySelector('input[name=mode]:checked')?.value;
+    // A disabled fieldset is not submitted, so only the endpoints used by the
+    // active mode are validated by the browser. Dual uses both.
+    form.querySelectorAll('fieldset[data-mode]').forEach(f => {
+      f.disabled = mode !== 'dual' && f.dataset.mode !== mode;
+    });
+  }
+  form.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('change', refresh));
+  refresh();
+})();
+</script>
+{% endblock %}

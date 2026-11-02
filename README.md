@@ -1,6 +1,6 @@
 # Open Lexa — Arduino Nano ESP32 + Atomic Echo Base
 
-**„Alexa” lokalnie na ESP32 → cichy sygnał → nagranie polecenia → UDP → odbiornik (host lub k3s) → API STT (cloud albo osobny Whisper na Hailo-10H) → tekst w konsoli.**
+**„Alexa” lokalnie na ESP32 → cichy sygnał → nagranie polecenia → UDP → odbiornik (host lub k3s) → API STT (lokalny Whisper + chmurowy GPT transcribe równolegle) → tekst w konsoli.**
 
 Repozytorium to monorepo z czterema komponentami. Każdy ma `src/` (kod), `build/` (Dockerfile + pipeline Tekton; dla firmware skrypty Arduino) i `deploy/` (manifesty Kubernetes):
 
@@ -43,7 +43,7 @@ W tej kopii projektu są już `.venv`, `.env` oraz `firmware/src/OpenLexaNano/Co
 Uzupełnij lokalnie:
 
 - `firmware/src/OpenLexaNano/Config.h`: `WIFI_SSID`, `WIFI_PASSWORD`, `RECEIVER_IP`.
-- `.env`: `OPENAI_API_KEY` i ewentualnie `STT_BACKEND` (domyślnie `openai`).
+- `.env`: `OPENAI_API_KEY`, `STT_HTTP_URL` (local Whisper API) i ewentualnie `STT_BACKEND` (domyślnie `dual`, gdy oba endpointy są ustawione; inaczej `openai`).
 - `RECEIVER_TOKEN` w `Config.h` musi być identyczny z `OPEN_LEXA_TOKEN` w `.env` / Secret k3s.
 
 `RECEIVER_IP` to **lokalny adres IPv4 odbiornika**, nie `127.0.0.1` i nie adres Tailscale. Przy wdrożeniu w k3s wpisz LAN-owy adres dowolnego węzła (np. `192.168.1.50`); usługa UDP jest publikowana na każdym węźle. Szczegóły w [`docs/KUBERNETES.md`](docs/KUBERNETES.md).
@@ -111,19 +111,46 @@ Odbiornik jest osobną usługą: ten sam pakiet działa lokalnie i w k3s; adres 
 
 ### Backendy STT
 
-Wybór przez `STT_BACKEND` lub `--backend`:
+Domyślny tryb to **`dual`**: każde nagranie jest równolegle wysyłane do lokalnego
+Whispera i do chmury (`gpt-transcribe`). Oba wyniki trafiają do archiwum, a tekst
+GPT jest preferowany dla komend i automatycznie staje się „poprawną
+transkrypcją” w adminie. Wybór przez `STT_BACKEND`, `--backend` lub zakładkę
+*Ustawienia*:
 
 | Backend | Zastosowanie | Wymagane zmienne |
 | --- | --- | --- |
-| `openai` | OpenAI Audio Transcriptions | `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, opcjonalnie `OPENAI_BASE_URL` |
-| `http` | dowolny endpoint zgodny z OpenAI — lokalny lub cloud | `STT_HTTP_URL`, `STT_HTTP_MODEL`, opcjonalnie `STT_HTTP_API_KEY` |
+| `dual` | lokalny Whisper **i** chmura równolegle (zalecane) | `STT_HTTP_URL`, `STT_HTTP_MODEL`, `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, opcjonalnie `OPENAI_BASE_URL` |
+| `openai` | tylko OpenAI Audio Transcriptions | `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, opcjonalnie `OPENAI_BASE_URL` |
+| `http` | tylko dowolny endpoint zgodny z OpenAI — lokalny lub cloud | `STT_HTTP_URL`, `STT_HTTP_MODEL`, opcjonalnie `STT_HTTP_API_KEY` |
 | `local` | zgodny wstecz alias `http` | jak wyżej |
 
-Odbiornik nie korzysta bezpośrednio z Hailo: model Whisper na Hailo-10H działa w osobnej usłudze [`whisper-api/`](whisper-api), do której receiver łączy się przez `http`.
+Bez jawnego `STT_BACKEND` odbiornik wybiera `dual`, gdy ustawione są
+`STT_HTTP_URL` i `OPENAI_API_KEY`; w przeciwnym razie zostaje przy `openai`.
+Odbiornik nie korzysta bezpośrednio z Hailo: model Whisper na Hailo-10H działa w
+osobnej usłudze [`whisper-api/`](whisper-api), do której receiver łączy się przez
+`http`.
 
-Wspólne: `STT_LANGUAGE` (domyślnie `pl`; `auto` wyłącza podpowiedź języka). `--model` nadpisuje model wybranego backendu.
+Wspólne: `STT_LANGUAGE` (domyślnie `pl`; `auto` wyłącza podpowiedź języka). `--model` nadpisuje model chmurowy w trybie `dual` albo model wybranego backendu.
 
-**Ustawienia z admin UI.** Zakładka *Ustawienia* w `open-lexa-admin` wybiera lokalne Whisper API (URL + model) albo serwis w chmurze (URL + klucz API + model) i język. Admin zapisuje je w SQLite i publikuje jako `_config/stt.json` na udziale SMB; odbiornik z włączonym archiwum SMB czyta ten plik co `OPEN_LEXA_SETTINGS_SECONDS` (domyślnie 30 s, `0` wyłącza) i przełącza backend przed kolejnym nagraniem. Kolejność: `--backend`/`--model` (wyłączają odczyt pliku) > `_config/stt.json` > zmienne `STT_*`/`OPENAI_*`. Brak pliku oznacza powrót do zmiennych; niepoprawny plik zostawia działający backend (`WARNING` w logu). Klucz API leży w pliku na udziale otwartym tekstem, więc udział musi być dostępny tylko dla Open Lexy.
+**Ustawienia z admin UI.** Zakładka *Ustawienia* w `open-lexa-admin` domyślnie
+wybiera **dual** (lokalne Whisper API + chmura: URL, model i klucz API) oraz
+język. Admin zapisuje je w SQLite i publikuje jako `_config/stt.json` na udziale
+SMB; odbiornik z włączonym archiwum SMB czyta ten plik co
+`OPEN_LEXA_SETTINGS_SECONDS` (domyślnie 30 s, `0` wyłącza) i przełącza backend
+przed kolejnym nagraniem. Kolejność: `--backend`/`--model` (wyłączają odczyt
+pliku) > `_config/stt.json` > zmienne `STT_*`/`OPENAI_*`. Brak pliku oznacza
+powrót do zmiennych; niepoprawny plik zostawia działający backend (`WARNING` w
+logu). Klucz API leży w pliku na udziale otwartym tekstem, więc udział musi być
+dostępny tylko dla Open Lexy.
+
+**Automatyczna korekta.** W trybie `dual` sidecar archiwum zawiera osobno
+`transcripts.local` i `transcripts.cloud` (tekst, model, błąd, czas),
+`corrected_text` oraz `corrected_source`. Admin wczytuje tekst GPT jako
+`corrected_transcript`, pokazuje obie wersje do porównania i pozwala jednym
+kliknięciem wstawić lokalną wersję. W praktyce wystarczy więc dodać intencję i
+encje — tekstu nie trzeba przepisywać. Jeśli wcześniej zapisano tryb `local`
+albo `cloud`, otwórz *Ustawienia*, wybierz `dual` i zapisz.
+
 
 Najpierw jakość audio, bez API:
 
@@ -139,8 +166,9 @@ Diagnostyka w monitorze: `s` pokazuje stan Wi-Fi, powód ostatniego resetu, etap
 Następnie STT:
 
 ```sh
-.venv/bin/open-lexa                               # OpenAI, język pl
-.venv/bin/open-lexa --backend http                # lokalny (np. Whisper API) lub cloudowy serwer OpenAI-compatible
+.venv/bin/open-lexa                               # dual (oba endpointy), język pl
+.venv/bin/open-lexa --backend dual                # wymuś lokalny Whisper + GPT transcribe
+.venv/bin/open-lexa --backend http                # tylko lokalny (np. Whisper API) lub cloudowy serwer OpenAI-compatible
 ```
 
 Po zakończeniu wypowiedzi program wypisuje rozpoznany tekst. `--save-dir recordings` można stosować również z STT; WAV jest zapisywany przed wywołaniem backendu. Bez tej opcji audio pozostaje w pamięci. Logi trafiają na stderr, transkrypcja na stdout.
@@ -149,7 +177,7 @@ Każda transkrypcja trafia do funkcji decyzyjnej `decide()` w [`udp-receiver/src
 
 #### Archiwum SMB (do retrainingu)
 
-Po ustawieniu `SMB_SERVER` i `SMB_SHARE` każde nagranie jest zapisywane na udziale SMB jako `\\SMB_SERVER\SMB_SHARE\SMB_PATH\RRRR-MM-DD\<ns>-<sesja>.wav` wraz z plikiem `.json` (tekst, język, backend, komenda, odpowiedź, czas trwania; przy błędzie STT `text: null` i `error`). JSON jest zapisywany po WAV, więc jego obecność oznacza kompletną parę. Klient SMB działa w Pythonie (`smbprotocol`), bez montowania CIFS, więc działa też w podzie non-root z read-only rootfs.
+Po ustawieniu `SMB_SERVER` i `SMB_SHARE` każde nagranie jest zapisywane na udziale SMB jako `\\SMB_SERVER\SMB_SHARE\SMB_PATH\RRRR-MM-DD\<ns>-<sesja>.wav` wraz z plikiem `.json` (tekst, język, backend, komenda, odpowiedź, czas trwania; przy błędzie STT `text: null` i `error`). W trybie `dual` sidecar zawiera dodatkowo `transcripts.local` i `transcripts.cloud` (tekst, model, błąd, czas odpowiedzi), `corrected_text` (tekst GPT) i `corrected_source`. JSON jest zapisywany po WAV, więc jego obecność oznacza kompletną parę. Klient SMB działa w Pythonie (`smbprotocol`), bez montowania CIFS, więc działa też w podzie non-root z read-only rootfs.
 
 | Zmienna | Domyślnie | Opis |
 | --- | --- | --- |
@@ -172,10 +200,11 @@ konfigurowalnego endpointu OpenAI-compatible:
 ESP32 -- UDP --> open-lexa receiver -- HTTP --> open-lexa-whisper Service --> Hailo-10H
 ```
 
-Lokalny wariant używa `STT_BACKEND=http` oraz
-`STT_HTTP_URL=http://open-lexa-whisper:8080/v1`. Ten sam receiver można
-przełączyć na cloud bez zmiany firmware: ustaw `STT_HTTP_URL`,
-`STT_HTTP_MODEL` i sekret `STT_HTTP_API_KEY`. Lokalna usługa obsługuje
+Domyślny wariant `dual` używa `STT_BACKEND=dual`,
+`STT_HTTP_URL=http://open-lexa-whisper:8080/v1` oraz `OPENAI_API_KEY` i
+`OPENAI_STT_MODEL=gpt-transcribe`. Ten sam receiver można przełączyć na sam
+lokalny Whisper (`STT_BACKEND=http`) albo sam cloud (`STT_BACKEND=openai` lub
+`http`) bez zmiany firmware. Lokalna usługa obsługuje
 `POST /v1/audio/transcriptions`, `GET /healthz` i `GET /readyz`; akceptuje
 mono WAV PCM16/16 kHz z limitu UDP (maks. 12 s).
 
@@ -183,7 +212,7 @@ mono WAV PCM16/16 kHz z limitu UDP (maks. 12 s).
 
 Weryfikacja UDP przez ServiceLB, sekrety, SMB i instrukcja Hailo-10H: [`docs/KUBERNETES.md`](docs/KUBERNETES.md). Budowanie obrazów (Docker lub Tekton): [`docs/BUILD.md`](docs/BUILD.md).
 
-- `udp-receiver/build/Dockerfile` — receiver (OpenAI / serwer OpenAI-compatible),
+- `udp-receiver/build/Dockerfile` — receiver (dual / OpenAI / serwer OpenAI-compatible),
 - `whisper-api/build/Dockerfile` — osobny obraz API z HailoRT i Whisper,
 - `admin-dashboard/build/Dockerfile` — panel admina,
 - `<komponent>/deploy` — manifesty kustomize z przypiętymi digestami obrazów.
@@ -205,7 +234,7 @@ osobnego API, więc kończy się błędem, jeśli nagranie nie zostanie przetwor
 
 ```sh
 .venv/bin/python udp-receiver/tools/test_hailo_recordings.py \
-  --expected-backend http --whisper-deployment open-lexa-whisper
+  --expected-backend dual --whisper-deployment open-lexa-whisper
 kubectl -n open-lexa logs -f deployment/open-lexa -c receiver
 ```
 
@@ -242,7 +271,7 @@ szczególnie przy cichych nagraniach z ESP32, bez zmiany głośnych sygnałów. 
 ./firmware/build/arduino.sh compile
 ```
 
-Testy obejmują protokół UDP, STT z mockiem, wybór backendu, faktyczny lokalny transfer 12 s audio, filtr antyaliasingowy/tempo resamplingu oraz limit długości, ciszę i przycinanie nagrania. Test C++ wymaga `g++`. Sama kompilacja nie potwierdza jakości mikrofonu ani czułości Alexa. 2026-10-06: firmware skompilowano i wgrano przez DFU na `/dev/ttyACM0`; 18 testów przeszło. Na fizycznym Nano usunięto reset przy przejściu od sygnału do nagrywania: `WakeNet9.clean()` w tym zestawie biblioteki/modelu powodował `LoadProhibited` w `dl_convq_queue_bzero`. Stan modelu jest teraz odtwarzany przez `destroy()` / `create()`. Potwierdzono start nagrania, zakończenie przy braku mowy i powrót do nasłuchu bez resetu. Test akustyczny, transfer z płytki i rzeczywista transkrypcja pozostają do potwierdzenia; skonfigurowana sieć Wi-Fi nie była widoczna, a klucz OpenAI w `.env` trzeba uzupełnić.
+Testy obejmują protokół UDP, STT z mockiem, wybór backendu, tryb dual (równoległe wywołanie lokalny + chmura, preferencja GPT i fallback), faktyczny lokalny transfer 12 s audio, filtr antyaliasingowy/tempo resamplingu oraz limit długości, ciszę i przycinanie nagrania. Test C++ wymaga `g++`. Sama kompilacja nie potwierdza jakości mikrofonu ani czułości Alexa. 2026-10-06: firmware skompilowano i wgrano przez DFU na `/dev/ttyACM0`; 18 testów przeszło. Na fizycznym Nano usunięto reset przy przejściu od sygnału do nagrywania: `WakeNet9.clean()` w tym zestawie biblioteki/modelu powodował `LoadProhibited` w `dl_convq_queue_bzero`. Stan modelu jest teraz odtwarzany przez `destroy()` / `create()`. Potwierdzono start nagrania, zakończenie przy braku mowy i powrót do nasłuchu bez resetu. Test akustyczny, transfer z płytki i rzeczywista transkrypcja pozostają do potwierdzenia; skonfigurowana sieć Wi-Fi nie była widoczna, a klucz OpenAI w `.env` trzeba uzupełnić.
 
 Model można odtworzyć skryptem `firmware/build/prepare_alexa_model.py`; wskazuje on stały commit ESP-SR v2.0.0. Zależności i licencje opisane są w [THIRD_PARTY.md](firmware/THIRD_PARTY.md).
 

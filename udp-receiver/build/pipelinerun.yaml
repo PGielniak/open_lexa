@@ -1,0 +1,38 @@
+# Create (not apply) this manifest for each build; generateName makes every
+# run unique and visible in Tekton Dashboard:
+#
+#   kubectl --context default -n tekton-builds create -f udp-receiver/build/pipelinerun.yaml
+#
+# Refresh the open-lexa-receiver-context ConfigMap first when sources changed (see
+# pipeline.yaml). After a successful run, pin the IMAGE_DIGEST result in
+# udp-receiver/deploy/kustomization.yaml.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: open-lexa-receiver-build-
+  namespace: tekton-builds
+  labels:
+    app.kubernetes.io/name: open-lexa
+    app.kubernetes.io/component: receiver-build-run
+spec:
+  pipelineRef:
+    name: open-lexa-receiver-build
+  taskRunTemplate:
+    podTemplate:
+      # Kaniko cannot cross-build and the amd64 build host has no ARM64 binfmt.
+      # The deployment nodes that run this image are ARM64.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      # Build pods do not need Kubernetes API credentials.
+      automountServiceAccountToken: false
+  timeouts:
+    pipeline: 20m
+  workspaces:
+    - name: source
+      configMap:
+        name: open-lexa-receiver-context
+    - name: build
+      emptyDir: {}
+  params:
+    - name: image
+      value: ghcr.io/pgielniak/open-lexa:0.4.0-dual

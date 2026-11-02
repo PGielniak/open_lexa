@@ -1,0 +1,38 @@
+# Create (not apply) this manifest for each build; generateName makes every
+# run unique and visible in Tekton Dashboard:
+#
+#   kubectl --context default -n tekton-builds create -f whisper-api/build/pipelinerun.yaml
+#
+# Refresh the open-lexa-whisper-api-context ConfigMap first when sources changed (see
+# pipeline.yaml). After a successful run, pin the IMAGE_DIGEST result in
+# whisper-api/deploy/kustomization.yaml.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: open-lexa-whisper-api-build-
+  namespace: tekton-builds
+  labels:
+    app.kubernetes.io/name: open-lexa
+    app.kubernetes.io/component: whisper-api-build-run
+spec:
+  pipelineRef:
+    name: open-lexa-whisper-api-build
+  taskRunTemplate:
+    podTemplate:
+      # Kaniko cannot cross-build and the amd64 build host has no ARM64 binfmt.
+      # HailoRT and the baked HEF are ARM64.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      # Build pods do not need Kubernetes API credentials.
+      automountServiceAccountToken: false
+  timeouts:
+    pipeline: 30m
+  workspaces:
+    - name: source
+      configMap:
+        name: open-lexa-whisper-api-context
+    - name: build
+      emptyDir: {}
+  params:
+    - name: image
+      value: ghcr.io/pgielniak/open-lexa-whisper-hailo:0.2.0-hailort5.4.0-whisper-small

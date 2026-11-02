@@ -1,0 +1,21 @@
+# Reachable only inside the tailnet: https://open-lexa-admin.<tailnet>.ts.net
+# (basic auth on top; password in Secret open-lexa-admin).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-lexa-admin
+  labels:
+    app.kubernetes.io/name: open-lexa-admin
+  # Optionally pin a Tailscale ProxyClass:
+  # annotations:
+  #   tailscale.com/proxy-class: <your-proxy-class>
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: open-lexa-admin
+      port:
+        name: http
+  tls:
+    - hosts:
+        - open-lexa-admin

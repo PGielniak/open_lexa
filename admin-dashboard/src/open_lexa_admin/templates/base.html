@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Open Lexa admin{% endblock %}</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+  --accent: #2f5bd3; --accent-text: #ffffff; --ok: #1f7a4d; --warn: #9a5b00; --bad: #b3261e;
+  --chip: #eef0f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #a09f99; --line: #34332f;
+    --accent: #7d9cff; --accent-text: #0f1220; --ok: #5cc28f; --warn: #e0a54a; --bad: #ff8a80;
+    --chip: #2a2c35;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+         padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header strong { margin-right: 8px; }
+header nav { display: flex; gap: 14px; flex-wrap: wrap; }
+header form { margin-left: auto; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 20px; margin: 4px 0 14px; }
+h2 { font-size: 16px; margin: 22px 0 8px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 10px; background: var(--chip); font-size: 13px; }
+.status-new { color: var(--warn); } .status-labeled { color: var(--ok); } .status-skipped { color: var(--muted); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 13px; color: var(--muted); font-weight: 600; }
+input, select, textarea, button { font: inherit; color: var(--text); }
+input[type=text], input[type=url], input[type=password], select, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); }
+textarea { min-height: 64px; resize: vertical; }
+button, .button { display: inline-block; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel); cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.link { border: none; background: none; color: var(--bad); padding: 2px 4px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.row > * { flex: 1 1 160px; }
+label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.notice { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; border: 1px solid var(--line); }
+.notice.ok { border-color: var(--ok); color: var(--ok); }
+.notice.warn { border-color: var(--warn); color: var(--warn); }
+.notice.bad { border-color: var(--bad); color: var(--bad); }
+fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px 14px; margin: 12px 0 0; }
+fieldset[disabled] { opacity: .55; }
+legend { padding: 0 6px; }
+label.inline { display: inline-flex; gap: 6px; align-items: center; font-size: 15px; color: var(--text); margin: 0 16px 0 0; }
+.scroll { overflow-x: auto; }
+@media (max-width: 640px) { .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <strong>Open Lexa</strong>
+  <nav>
+    <a href="/recordings?status=new">Do oznaczenia</a>
+    <a href="/recordings">Wszystkie</a>
+    <a href="/dictionary">Słownik</a>
+    <a href="/record">Nagraj</a>
+    <a href="/settings">Ustawienia</a>
+  </nav>
+  <form method="post" action="/sync"><button title="Pobierz nowe nagrania z SMB i wyeksportuj lexicon">Synchronizuj</button></form>
+</header>
+<main>
+{% if worker.last_error %}<div class="notice warn">Błąd zadania w tle: {{ worker.last_error }}</div>{% endif %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

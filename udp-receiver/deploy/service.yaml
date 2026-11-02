@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-lexa-udp
+  labels:
+    app.kubernetes.io/name: open-lexa
+spec:
+  # k3s ServiceLB (klipper-lb) supports UDP. It binds this port as a hostPort
+  # on every node, so the ESP32 can use any node's LAN IPv4 without Tailscale.
+  # The advertised EXTERNAL-IP values are the nodes' Tailscale IPs, not a
+  # restriction on the LAN listener. Cluster policy allows the pod to run on a
+  # different node than the one receiving the packet.
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/name: open-lexa
+  ports:
+    - name: udp
+      port: 12345
+      targetPort: udp
+      protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-lexa-health
+  labels:
+    app.kubernetes.io/name: open-lexa
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: open-lexa
+  ports:
+    - name: health
+      port: 8080
+      targetPort: health

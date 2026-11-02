@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Nagrania</h1>
+<div class="row" style="margin-bottom:12px">
+  <div>
+    {% for s, label in [('new', 'nowe'), ('labeled', 'oznaczone'), ('skipped', 'pominięte')] %}
+    <a class="chip" href="{{ link(status=s, page=None) }}"{% if status == s %} style="outline:2px solid var(--accent)"{% endif %}>{{ label }}: {{ counts[s] }}</a>
+    {% endfor %}
+    <a class="chip" href="{{ link(status=None, page=None) }}">wszystkie</a>
+  </div>
+  <form method="get" action="/recordings">
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    <select name="intent" onchange="this.form.submit()" aria-label="Filtr intencji">
+      <option value="">— każda intencja —</option>
+      {% for i in intents %}<option value="{{ i.name }}"{% if intent == i.name %} selected{% endif %}>{{ '  ' * i.depth }}{{ i.name }}</option>{% endfor %}
+    </select>
+  </form>
+</div>
+<div class="panel scroll">
+<table>
+  <thead><tr><th>Kiedy (UTC)</th><th>Lokalny Whisper</th><th>GPT / poprawna</th><th>Intencja</th><th class="hide-sm">Status</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td class="mono"><a href="/recordings/{{ r.id }}">{{ r.recorded_at[:16].replace('T', ' ') }}</a><br><span class="muted">{{ '%.1f' % (r.duration_seconds or 0) }} s{% if r.origin == 'browser' %} · mikrofon{% elif r.origin == 'upload' %} · plik{% endif %}</span></td>
+    <td>{% if r.original_transcript %}{{ r.original_transcript }}{% elif r.stt_error %}<span class="muted">błąd STT</span>{% else %}<span class="muted">(pusto)</span>{% endif %}</td>
+    <td>{% if r.corrected_transcript %}{{ r.corrected_transcript }}{% if r.status == 'new' and r.corrected_source == 'cloud' %} <span class="chip">GPT</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>{% if r.intent %}<span class="chip">{{ r.intent }}</span>{% elif r.predicted_intent %}<span class="muted">{{ r.predicted_intent }}?</span>{% endif %}</td>
+    <td class="hide-sm status-{{ r.status }}">{{ r.status }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">Brak nagrań.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p>
+  {% if page > 1 %}<a href="{{ link(page=page - 1) }}">← nowsze</a>{% endif %}
+  {% if has_next %}<a href="{{ link(page=page + 1) }}" style="float:right">starsze →</a>{% endif %}
+</p>
+{% endblock %}

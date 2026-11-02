@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# UDP receiver; also owns the open-lexa namespace, so apply it first:
+#   kubectl apply -k udp-receiver/deploy
+namespace: open-lexa
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+images:
+  - name: open-lexa
+    newName: ghcr.io/pgielniak/open-lexa
+    newTag: 0.4.0-dual
+    # Built by Tekton PipelineRun open-lexa-receiver-build-gn4sd.
+    # Pinning the digest keeps rollouts reproducible even if the tag moves.
+    digest: sha256:96c7640f9245db82bf395541d88fb662a788aaaf674fe25039abb8d2930a24aa

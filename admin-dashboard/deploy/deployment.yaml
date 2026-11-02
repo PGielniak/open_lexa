@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-lexa-admin
+  labels:
+    app.kubernetes.io/name: open-lexa-admin
+spec:
+  # SQLite + an in-process ingest/export thread: exactly one writer.
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-lexa-admin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-lexa-admin
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull
+      # The image is built by kaniko on an arm64 node.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        # Lets the non-root user create the database and its -wal/-shm files.
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: admin
+          image: open-lexa-admin
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: open-lexa-admin-config
+            - secretRef:
+                name: open-lexa-smb
+            - secretRef:
+                name: open-lexa-admin
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: open-lexa-admin-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

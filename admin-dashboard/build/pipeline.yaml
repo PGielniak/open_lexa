@@ -1,0 +1,131 @@
+# Build and push the admin dashboard image (it also installs the receiver package) with Kaniko.
+# The build context is a tarball of the repository root stored in the ConfigMap
+# tekton-builds/open-lexa-admin-context (see docs/BUILD.md), so no git checkout is needed:
+#
+#   tar --exclude=__pycache__ --exclude='*.egg-info' --exclude=tests \
+#     -czf /tmp/open-lexa-admin-context.tar.gz .dockerignore udp-receiver admin-dashboard
+#   kubectl --context default -n tekton-builds create configmap open-lexa-admin-context \
+#     --from-file=context.tar.gz=/tmp/open-lexa-admin-context.tar.gz \
+#     --dry-run=client -o yaml | kubectl --context default apply -f -
+#   kubectl --context default apply -f admin-dashboard/build/pipeline.yaml
+#   kubectl --context default -n tekton-builds create -f admin-dashboard/build/pipelinerun.yaml
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: open-lexa-admin-build
+  namespace: tekton-builds
+  labels:
+    app.kubernetes.io/name: open-lexa
+    app.kubernetes.io/component: admin-build
+spec:
+  description: >-
+    Build and push the admin dashboard image (it also installs the receiver package) from a packaged source context. This is a
+    single-task Pipeline so its one build pod can share an emptyDir without a
+    Longhorn PVC.
+  params:
+    - name: image
+      type: string
+      default: ghcr.io/pgielniak/open-lexa-admin:0.3.0-dual
+    - name: source-key
+      type: string
+      default: context.tar.gz
+  results:
+    - name: IMAGE_DIGEST
+      value: $(tasks.build.results.IMAGE_DIGEST)
+  workspaces:
+    - name: source
+      description: Read-only context ConfigMap.
+    - name: build
+      description: Writable emptyDir shared by unpack and Kaniko steps.
+  tasks:
+    - name: build
+      params:
+        - name: IMAGE
+          value: $(params.image)
+        - name: SOURCE_KEY
+          value: $(params.source-key)
+      workspaces:
+        - name: source
+          workspace: source
+        - name: build
+          workspace: build
+      taskSpec:
+        params:
+          - name: IMAGE
+            description: Push destination; GHCR paths must be lowercase.
+            type: string
+          - name: SOURCE_KEY
+            description: Key of the context tarball in the source ConfigMap workspace.
+            type: string
+        results:
+          - name: IMAGE_DIGEST
+            description: sha256 digest of the pushed image, written by Kaniko.
+        workspaces:
+          - name: source
+            description: Read-only ConfigMap containing the context tarball.
+            readOnly: true
+          - name: build
+            description: Writable emptyDir where the context is extracted and built.
+        stepTemplate:
+          # Keep the restricted-namespace defaults, but allow Kaniko's documented
+          # root execution. The namespace still forbids privileged containers.
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+        steps:
+          - name: unpack-context
+            # Same digest-pinned multi-arch image used by the existing clone task.
+            image: docker.io/alpine/git:v2.54.0@sha256:e8ceedc73bd80992ae8d58a7d24c58b8322146c354f1d2e81a97db4452068ec0
+            workingDir: $(workspaces.build.path)
+            computeResources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            script: |
+              #!/bin/sh
+              set -eu
+              archive="$(workspaces.source.path)/$(params.SOURCE_KEY)"
+              test -s "$archive" || {
+                echo "missing source archive: $archive" >&2
+                exit 1
+              }
+              # The ConfigMap workspace is read-only; extract into the emptyDir.
+              tar -xzf "$archive" -C "$(workspaces.build.path)"
+              test -f "$(workspaces.build.path)/admin-dashboard/build/Dockerfile"
+              test -f "$(workspaces.build.path)/admin-dashboard/src/open_lexa_admin/app.py"
+              echo "context archive extracted successfully"
+          - name: build-and-push
+            # The same Kaniko v1.24.0-debug digest pin as the homelab build tasks.
+            image: gcr.io/kaniko-project/executor:v1.24.0-debug@sha256:2562c4fe551399514277ffff7dcca9a3b1628c4ea38cb017d7286dc6ea52f4cd
+            workingDir: $(workspaces.build.path)
+            computeResources:
+              requests:
+                cpu: 500m
+                memory: 1Gi
+              limits:
+                cpu: "3"
+                memory: 4Gi
+            command: ['/kaniko/executor']
+            args:
+              - '--dockerfile=$(workspaces.build.path)/admin-dashboard/build/Dockerfile'
+              - '--context=dir://$(workspaces.build.path)'
+              - '--destination=$(params.IMAGE)'
+              - '--digest-file=$(results.IMAGE_DIGEST.path)'
+              # The build pod is ARM64; redo snapshots are reliable on the Pi nodes.
+              - '--snapshot-mode=redo'
+              - '--verbosity=info'
+            volumeMounts:
+              - name: docker-config
+                mountPath: /kaniko/.docker
+                readOnly: true
+        volumes:
+          - name: docker-config
+            secret:
+              secretName: tekton-kaniko-push
+              items:
+                - key: .dockerconfigjson
+                  path: config.json

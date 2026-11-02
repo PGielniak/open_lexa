@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-lexa-whisper-config
+  labels:
+    app.kubernetes.io/name: open-lexa-whisper
+    app.kubernetes.io/component: stt
+data:
+  WHISPER_API_BIND: "0.0.0.0"
+  WHISPER_API_PORT: "8080"
+  # The receiver sends this model name; it is an API contract label, not an
+  # OpenAI download. The image below contains the actual Hailo HEF.
+  WHISPER_API_MODEL: "whisper-1"
+  WHISPER_API_LANGUAGE: "pl"
+  WHISPER_API_QUEUE_SIZE: "4"
+  WHISPER_API_REQUEST_TIMEOUT_SECONDS: "45"
+  HAILO_WHISPER_HEF: "/models/Whisper-Small.hef"
+  HAILO_VDEVICE_GROUP_ID: "SHARED"
+  HAILO_WHISPER_TIMEOUT_MS: "15000"
+  HAILO_WHISPER_CHUNK_SECONDS: "10"
+  HAILO_WHISPER_NORMALIZE_PEAK: "0.9"
+  HOME: "/tmp"
+  HAILORT_LOGGER_PATH: "/tmp/hailort.log"

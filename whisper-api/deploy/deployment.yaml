@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-lexa-whisper
+  labels:
+    app.kubernetes.io/name: open-lexa-whisper
+    app.kubernetes.io/component: stt
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-lexa-whisper
+      app.kubernetes.io/component: stt
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-lexa-whisper
+        app.kubernetes.io/component: stt
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        homelab.pgielnia.cc/hailo10h: "true"
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: whisper-api
+          image: open-lexa-whisper-hailo
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: open-lexa-whisper-config
+            # Optional only because the in-cluster ClusterIP Service does not
+            # need authentication. If defined, it may contain WHISPER_API_KEY.
+            - secretRef:
+                name: open-lexa-whisper-secrets
+                optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+              hailo.ai/h10h: 1
+            limits:
+              cpu: "4"
+              memory: 2Gi
+              # Hailo's device plugin requires matching request/limit values.
+              hailo.ai/h10h: 1
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

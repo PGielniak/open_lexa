@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-lexa-config
+  labels:
+    app.kubernetes.io/name: open-lexa
+data:
+  # The service listens on UDP 12345 and exposes HTTP health on 8080.
+  OPEN_LEXA_BIND: "0.0.0.0"
+  OPEN_LEXA_PORT: "12345"
+  OPEN_LEXA_HEALTH_PORT: "8080"
+  # dual: every recording goes to the local Whisper API and cloud GPT
+  # transcribe in parallel. The GPT text is stored as the automatically
+  # corrected transcript and is preferred for command handling. Set
+  # STT_BACKEND=http for local-only or openai for cloud-only operation.
+  # Use STT_BACKEND=http (local only) if OPENAI_API_KEY is not configured.
+  STT_BACKEND: "dual"
+  STT_HTTP_URL: "http://open-lexa-whisper:8080/v1"
+  STT_HTTP_MODEL: "whisper-1"
+  # STT_HTTP_API_KEY belongs in open-lexa-secrets, never here.
+  STT_LANGUAGE: "pl"
+  # Cloud endpoint for dual/openai (OPENAI_API_KEY in open-lexa-secrets).
+  OPENAI_STT_MODEL: "gpt-transcribe"
+  # OPENAI_BASE_URL: "https://api.openai.com/v1"
+  # Archive every recording + transcript to the dedicated Samba share for
+  # retraining (credentials: Secret open-lexa-smb; see docs/KUBERNETES.md).
+  # Archive writes are asynchronous; transcription stays on the request path.
+  # Replace with your SMB server (hostname or in-cluster Service DNS).
+  SMB_SERVER: "nas.example.lan"
+  SMB_SHARE: "open-lexa"
+  SMB_PATH: ""
+  SMB_TIMEOUT: "10"

@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Hailo Whisper API; the namespace comes from udp-receiver/deploy:
+#   kubectl apply -k whisper-api/deploy
+namespace: open-lexa
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+images:
+  - name: open-lexa-whisper-hailo
+    newName: ghcr.io/pgielniak/open-lexa-whisper-hailo
+    newTag: 0.2.0-hailort5.4.0-whisper-small
+    # Built by Tekton PipelineRun open-lexa-whisper-api-build-9x74h.
+    # Pinning the digest keeps rollouts reproducible even if the tag moves.
+    digest: sha256:648a60042d84829ba68f96b397ef2e63c25570ccb8684a0141e6c08225c4c883

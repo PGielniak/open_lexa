@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Admin dashboard; the namespace comes from udp-receiver/deploy:
+#   kubectl apply -k admin-dashboard/deploy
+namespace: open-lexa
+resources:
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+images:
+  - name: open-lexa-admin
+    newName: ghcr.io/pgielniak/open-lexa-admin
+    newTag: 0.3.0-dual
+    # Built by Tekton PipelineRun open-lexa-admin-build-622lw.
+    digest: sha256:1b8425ac96e5cd4bc6686a59f08eee03283e8f89572d05b86bf6b36bdef89241

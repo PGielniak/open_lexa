@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-lexa-admin-config
+  labels:
+    app.kubernetes.io/name: open-lexa-admin
+data:
+  ADMIN_DB: "/data/labels.sqlite3"
+  ADMIN_USERNAME: "admin"
+  ADMIN_INGEST_SECONDS: "60"
+  # Same dedicated share as the receiver archive (credentials: Secret open-lexa-smb).
+  SMB_SERVER: "nas.example.lan"
+  SMB_SHARE: "open-lexa"
+  SMB_PATH: ""
+  SMB_TIMEOUT: "10"

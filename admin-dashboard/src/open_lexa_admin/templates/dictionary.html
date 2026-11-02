@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Słownik — Open Lexa admin{% endblock %}
+{% block content %}
+<h1>Słownik</h1>
+
+<h2>Intencje</h2>
+<div class="panel scroll">
+<table>
+  <thead><tr><th>Intencja</th><th>Opis</th><th>Encje</th><th>Frazy i szablony</th></tr></thead>
+  <tbody>
+  {% for i in intents %}
+  <tr>
+    <td class="mono">{{ '   ' * i.depth }}{{ i.name }}{% if not i.is_actionable %}<br><span class="muted">bez akcji</span>{% endif %}</td>
+    <td>{{ i.description or '' }}</td>
+    <td>{% for t in allowed.get(i.name, []) %}<span class="chip">{{ t }}</span> {% endfor %}</td>
+    <td>
+      {% for p in phrases if p.intent == i.name %}
+      <form method="post" style="display:inline">
+        <input type="hidden" name="action" value="delete_phrase"><input type="hidden" name="id" value="{{ p.id }}">
+        <span class="chip">{{ p.phrase }} <button class="link" title="Usuń frazę">×</button></span>
+      </form>
+      {% endfor %}
+      <form method="post" class="row" style="margin-top:6px">
+        <input type="hidden" name="action" value="add_phrase"><input type="hidden" name="intent" value="{{ i.name }}">
+        <input type="text" name="phrase" placeholder="np. puść {search_query} na spotify" aria-label="Nowa fraza dla {{ i.name }}">
+        <button style="flex:0 0 auto">dodaj</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<form method="post" class="panel" style="margin-top:12px">
+  <input type="hidden" name="action" value="add_intent">
+  <div class="row">
+    <div><label>Nowa intencja</label><input type="text" name="name" placeholder="np. play_podcast"></div>
+    <div><label>Rodzic</label>
+      <select name="parent"><option value="">— brak —</option>{% for i in intents %}<option value="{{ i.name }}">{{ i.name }}</option>{% endfor %}</select></div>
+    <div><label>Opis</label><input type="text" name="description"></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div>{% for t in entity_types %}<label style="display:inline-block;margin-right:12px"><input type="checkbox" name="entity_types" value="{{ t.name }}"> {{ t.name }}</label>{% endfor %}
+      <label style="display:inline-block"><input type="checkbox" name="non_actionable" value="1"> bez akcji</label></div>
+    <div style="flex:0 0 auto"><button class="primary">Dodaj intencję</button></div>
+  </div>
+</form>
+
+<h2>Wartości encji i synonimy</h2>
+<p class="muted" style="margin-top:0;font-size:13px">Synonimy „learned” powstają z etykiet (jak STT przekręciło nazwę). Synonimy są przechowywane w postaci znormalizowanej.</p>
+{% for t in entity_types %}
+<div class="panel" style="margin-bottom:12px">
+  <strong>{{ t.name }}</strong> <span class="muted">({{ t.kind }}{% if t.description %} — {{ t.description }}{% endif %})</span>
+  {% if t.kind != 'number' %}
+  <table style="margin-top:8px">
+    {% for v in values if v.type == t.name %}
+    <tr>
+      <td style="width:30%">{{ v.value }}
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="delete_value"><input type="hidden" name="id" value="{{ v.id }}"><button class="link" title="Usuń wartość (tylko nieużywaną w etykietach)">×</button></form></td>
+      <td>
+        {% for s in v.synonyms %}
+        <form method="post" style="display:inline">
+          <input type="hidden" name="action" value="delete_synonym"><input type="hidden" name="id" value="{{ s.id }}">
+          <span class="chip"{% if s.source == 'learned' %} title="nauczony z nagrania #{{ s.recording_id }}" style="font-style:italic"{% endif %}>{{ s.synonym }} <button class="link" title="Usuń synonim">×</button></span>
+        </form>
+        {% endfor %}
+        <form method="post" style="display:inline-flex;gap:6px;margin-top:4px">
+          <input type="hidden" name="action" value="add_synonym"><input type="hidden" name="value_id" value="{{ v.id }}">
+          <input type="text" name="synonym" placeholder="synonim" aria-label="Nowy synonim dla {{ v.value }}" style="width:140px"><button>+</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td class="muted">Brak wartości.</td></tr>
+    {% endfor %}
+  </table>
+  <form method="post" class="row" style="margin-top:8px">
+    <input type="hidden" name="action" value="add_value"><input type="hidden" name="entity_type" value="{{ t.name }}">
+    <div><input type="text" name="value" placeholder="{% if t.name == 'search_query' %}np. Pendulum{% else %}nowa wartość{% endif %}" aria-label="Nowa wartość {{ t.name }}"></div>
+    <div><input type="text" name="synonyms" placeholder="synonimy po przecinku" aria-label="Synonimy"></div>
+    <div style="flex:0 0 auto"><button>Dodaj</button></div>
+  </form>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-lexa"
+version = "0.1.0"
+description = "Open Lexa UDP receiver with pluggable OpenAI-compatible speech-to-text"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "openai>=2,<3",
+    "python-dotenv>=1,<2",
+    "smbprotocol>=1.14,<2",
+]
+
+[project.scripts]
+open-lexa = "open_lexa.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

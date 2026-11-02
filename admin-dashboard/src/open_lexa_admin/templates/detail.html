@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Nagranie {{ r.stem }} — Open Lexa admin{% endblock %}
+{% block content %}
+<p><a href="/recordings?status=new">← lista</a></p>
+<h1>{{ r.recorded_at[:19].replace('T', ' ') }} UTC <span class="chip status-{{ r.status }}">{{ r.status }}</span></h1>
+{% if saved and not warnings %}<div class="notice ok">Zapisano.</div>{% endif %}
+{% for w in warnings %}<div class="notice warn">{{ w }}</div>{% endfor %}
+
+<div class="panel">
+  <audio controls preload="auto" src="/recordings/{{ r.id }}/audio" style="width:100%"></audio>
+  <p class="muted mono" style="margin:8px 0 0">
+    {{ r.audio_path }} · {{ '%.2f' % (r.duration_seconds or 0) }} s · {% if r.origin == 'browser' %}mikrofon w przeglądarce · {% elif r.origin == 'upload' %}wgrany plik · {% endif %}{{ r.stt_backend or '?' }}{% if r.stt_model %} / {{ r.stt_model }}{% endif %}
+    {% if r.predicted_intent %} · system: {{ r.predicted_intent }}{% if r.predicted_score %} ({{ '%.0f' % r.predicted_score }}){% endif %}{% endif %}
+  </p>
+  <h2>Transkrypcje STT</h2>
+  {% if transcripts %}
+  <table>
+    {% for role, t in transcripts.items() %}
+    {% if t is mapping %}
+    {% set label = {'local': 'Lokalny Whisper', 'cloud': 'GPT transcribe'}.get(role, role) %}
+    <tr>
+      <th style="width:170px">{{ label }}{% if role == 'cloud' %}<br><span class="chip">auto „poprawna”</span>{% endif %}</th>
+      <td>
+        {% if t.text %}{{ t.text }}{% elif t.error %}<span class="muted">błąd: {{ t.error }}</span>{% else %}<span class="muted">(pusto)</span>{% endif %}
+        <div class="muted mono" style="margin-top:3px">{{ t.backend }}{% if t.model %} / {{ t.model }}{% endif %}{% if t.latency_ms is defined and t.latency_ms is not none %} · {{ t.latency_ms }} ms{% endif %}
+          {% if t.text %}<button type="button" class="use-transcript" data-text="{{ t.text }}">wstaw do poprawnej</button>{% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+  </table>
+  {% else %}
+  <p id="original" style="margin:0">{% if r.original_transcript %}{{ r.original_transcript }}{% elif r.stt_error %}<span class="muted">błąd STT: {{ r.stt_error }}</span>{% else %}<span class="muted">(pusto)</span>{% endif %}</p>
+  {% endif %}
+</div>
+
+<form method="post" class="panel" style="margin-top:14px" id="label-form">
+  <label for="corrected">Poprawna transkrypcja</label>
+  <p class="muted" style="margin:0 0 5px;font-size:13px">Domyślnie wypełniona transkrypcją GPT z chmury. Popraw tylko wtedy, gdy GPT się pomylił.</p>
+  <textarea id="corrected" name="corrected_transcript">{{ r.corrected_transcript or '' }}</textarea>
+
+  <div class="row" style="margin-top:12px">
+    <div>
+      <label for="intent">Intencja</label>
+      <select id="intent" name="intent">
+        <option value="">— wybierz —</option>
+        {% for i in intents if i.enabled %}
+        <option value="{{ i.name }}"{% if r.intent == i.name %} selected{% endif %}>{{ '   ' * i.depth }}{{ i.name }}{% if not i.is_actionable %} (bez akcji){% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="muted" id="intent-help" style="font-size:13px"></div>
+  </div>
+
+  <h2>Encje</h2>
+  <p class="muted" style="margin-top:0;font-size:13px">Wartość wpisz poprawnie (np. „drum and bass”). „Jak usłyszało STT” to fragment oryginalnej transkrypcji — trafi do słownika jako synonim.</p>
+  <div id="entities">
+    {% for e in entities %}{% set row = e %}{% include "entity_row.html" %}{% endfor %}
+  </div>
+  <template id="entity-template">{% set row = None %}{% include "entity_row.html" %}</template>
+  <button type="button" id="add-entity">+ encja</button>
+
+  <label for="notes" style="margin-top:12px">Notatki</label>
+  <input type="text" id="notes" name="notes" value="{{ r.notes or '' }}">
+
+  <div class="row" style="margin-top:16px">
+    <div style="flex:0 0 auto"><button class="primary" name="action" value="next" title="Ctrl+Enter">Zapisz i następne</button></div>
+    <div style="flex:0 0 auto"><button name="action" value="save">Zapisz</button></div>
+    <div style="flex:0 0 auto"><button name="action" value="skip">Pomiń</button></div>
+    {% if r.status != 'new' %}<div style="flex:0 0 auto"><button name="action" value="reset">Cofnij do „nowe”</button></div>{% endif %}
+  </div>
+</form>
+
+<script>
+(() => {
+  const allowed = {{ allowed | tojson }};
+  const intents = {{ intents | map(attribute='name') | list | tojson }};
+  const descriptions = {{ intents | map(attribute='description') | list | tojson }};
+  const form = document.getElementById('label-form');
+  const list = document.getElementById('entities');
+  const intent = document.getElementById('intent');
+  const help = document.getElementById('intent-help');
+  const corrected = document.getElementById('corrected');
+
+  document.querySelectorAll('.use-transcript').forEach(button => {
+    button.addEventListener('click', () => {
+      corrected.value = button.dataset.text;
+      corrected.focus();
+    });
+  });
+
+  function refreshIntent() {
+    const types = allowed[intent.value] || [];
+    const i = intents.indexOf(intent.value);
+    help.textContent = (i >= 0 && descriptions[i] ? descriptions[i] : '') +
+      (types.length ? ' · encje: ' + types.join(', ') : '');
+    list.querySelectorAll('select[name=entity_type]').forEach(select => {
+      [...select.options].forEach(o => { o.textContent = o.value + (types.includes(o.value) ? ' ✓' : ''); });
+    });
+  }
+
+  function wire(row) {
+    row.querySelector('.remove').addEventListener('click', () => row.remove());
+    row.querySelector('.suggest').addEventListener('click', async () => {
+      const value = row.querySelector('[name=entity_value]').value;
+      const response = await fetch(`/recordings/{{ r.id }}/suggest?value=${encodeURIComponent(value)}`);
+      if (response.ok) row.querySelector('[name=entity_fragment]').value = (await response.json()).fragment;
+    });
+  }
+
+  document.getElementById('add-entity').addEventListener('click', () => {
+    const row = document.getElementById('entity-template').content.firstElementChild.cloneNode(true);
+    const types = allowed[intent.value] || [];
+    if (types.length) row.querySelector('select[name=entity_type]').value = types[0];
+    list.appendChild(row);
+    wire(row);
+    refreshIntent();
+    row.querySelector('[name=entity_value]').focus();
+  });
+  list.querySelectorAll('.entity').forEach(wire);
+  intent.addEventListener('change', refreshIntent);
+  refreshIntent();
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      form.querySelector('button[value=next]').click();
+    }
+  });
+})();
+</script>
+{% endblock %}

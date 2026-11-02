@@ -1,0 +1,21 @@
+<div class="row entity" style="margin-bottom:10px">
+  <div style="flex:0 1 170px">
+    <label>Typ</label>
+    <select name="entity_type">
+      {% for t in entity_types %}<option value="{{ t.name }}"{% if row and row.type == t.name %} selected{% endif %}>{{ t.name }}</option>{% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Wartość (poprawna)</label>
+    <input type="text" name="entity_value" value="{{ row.value if row else '' }}">
+  </div>
+  <div>
+    <label>Jak usłyszało STT</label>
+    <input type="text" name="entity_fragment" value="{{ (row.original_fragment or '') if row else '' }}">
+  </div>
+  <div style="flex:0 0 auto">
+    <button type="button" class="suggest" title="Znajdź fragment w transkrypcji STT">podpowiedz</button>
+    <button type="button" class="link remove" title="Usuń encję">usuń</button>
+  </div>
+  {% if row and row.span_start is none %}<div class="muted" style="flex-basis:100%;font-size:13px">brak pozycji w poprawionej transkrypcji</div>{% endif %}
+</div>

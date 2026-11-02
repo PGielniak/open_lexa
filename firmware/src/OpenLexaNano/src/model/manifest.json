@@ -1,0 +1,12 @@
+{
+  "source": "https://github.com/espressif/esp-sr",
+  "revision": "1c0503e7e2dc5e1ecb2fd3da0a5d7e51e3574842",
+  "model": "wn9_alexa",
+  "files": {
+    "_MODEL_INFO_": "a93580fe133549f8bb3806317a289d8802721ccfbde87431eff13120e3108a24",
+    "wn9_index": "c5557ca5d1ec6943540a6abbb3ea235a693f4637369f92e873ff566b73a61cfd",
+    "wn9_data": "232af46bf553dd832733bb12d0cd4b4027c5b134693870ca6d32a61718c3c7ac"
+  },
+  "packed_bytes": 291033,
+  "packed_sha256": "3b9e355c67aa34277df501744bd947c516edd718af3dd517ccfca0fd64506d20"
+}

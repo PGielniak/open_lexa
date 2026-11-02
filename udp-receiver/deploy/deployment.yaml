@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-lexa
+  labels:
+    app.kubernetes.io/name: open-lexa
+spec:
+  # UDP packet reassembly is stateful per process.
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-lexa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-lexa
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: ghcr-pull
+      # The image is built ARM64 by Tekton on a Pi. Without this selector the
+      # scheduler could place it on the amd64 control plane, where kubelet
+      # would fail with an exec-format error.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: receiver
+          image: open-lexa
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: open-lexa-config
+            - secretRef:
+                name: open-lexa-secrets
+            - secretRef:
+                name: open-lexa-smb
+          ports:
+            - name: udp
+              containerPort: 12345
+              protocol: UDP
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

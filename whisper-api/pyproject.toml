@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-lexa-whisper-api"
+version = "0.1.0"
+description = "OpenAI-compatible transcription API for Whisper on a Hailo-10H"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "numpy>=1.26",
+    "python-dotenv>=1,<2",
+]
+
+[project.scripts]
+open-lexa-whisper-api = "open_lexa_whisper.api:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

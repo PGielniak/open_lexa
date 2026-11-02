@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+# setuptools output when a component is built outside Docker (build/ holds Dockerfile + Tekton).
+*/build/lib/
+*/build/bdist.*/
+.env
+recordings/
+
+firmware/secrets.yaml
+firmware/src/OpenLexaNano/Config.h
+# arduino-cli output of firmware/build/arduino.sh
+firmware/.build/
+# Local kustomize overlays with real homelab values (see deploy-local/README.md).
+deploy-local/
