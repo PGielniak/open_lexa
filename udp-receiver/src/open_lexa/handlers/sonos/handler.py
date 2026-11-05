@@ -24,10 +24,27 @@ from .spotify import SpotifyClient, SpotifyError
 LOG = logging.getLogger('open_lexa.handlers.sonos')
 
 INTENTS = frozenset({
-    'play_music', 'play_spotify', 'play_radio',
+    'play_music', 'play_spotify', 'queue_spotify', 'play_radio',
     'stop', 'pause', 'resume', 'next_track', 'previous_track',
     'volume_up', 'volume_down', 'volume_set',
 })
+
+# Only a genre name (not an artist/title) should start a playlist, not the
+# first unrelated track returned by Spotify's multi-type search.
+GENRES = {
+    'drum and bass': 'drum and bass', 'dram and bass': 'drum and bass',
+    'drum & bass': 'drum and bass', 'drum bass': 'drum and bass',
+    'dnb': 'drum and bass',
+    'ambient': 'ambient', 'blues': 'blues', 'country': 'country',
+    'disco': 'disco', 'dubstep': 'dubstep', 'funk': 'funk',
+    'hip hop': 'hip hop', 'hip-hop': 'hip hop', 'hip hopu': 'hip hop',
+    'house': 'house', 'jazz': 'jazz', 'jazzu': 'jazz',
+    'klasyczna': 'classical', 'classical': 'classical',
+    'metal': 'metal', 'metalu': 'metal', 'pop': 'pop', 'popu': 'pop',
+    'punk': 'punk', 'rap': 'rap', 'rapu': 'rap',
+    'reggae': 'reggae', 'rock': 'rock', 'rocka': 'rock', 'soul': 'soul',
+    'techno': 'techno', 'trance': 'trance',
+}
 
 
 def _clamp(value, default: int, low: int, high: int) -> int:
@@ -111,6 +128,8 @@ class SonosHandler(CommandHandler):
         intent = request.intent
         if intent == 'play_spotify':
             return self._play_spotify(request)
+        if intent == 'queue_spotify':
+            return self._queue_spotify(request)
         if intent == 'play_music':
             source = (request.entities.get('source') or '').casefold()
             if source == 'spotify':
@@ -147,26 +166,45 @@ class SonosHandler(CommandHandler):
         query = (request.entities.get('search_query') or '').strip()
         if not query:
             return self._play_default(source_label='Spotify')
-        utterance = (request.text or '').casefold()
-        preferred = ('playlist' if 'playlist' in utterance else
-                     'album' if 'album' in utterance else
-                     'artist' if any(word in utterance for word in ('artyst', 'wykonawc', 'zespoł', 'zespol'))
-                     else None)
-        result = self.spotify.search_best(query, preferred=preferred)
+        result = self._resolve_spotify(query, request.text)
         self.speaker.play_spotify(result['uri'], result['title'])
         return HandlerResult.handled(f"Gram {result['title']} ze Spotify", **result)
 
+    def _queue_spotify(self, request) -> HandlerResult:
+        query = (request.entities.get('search_query') or '').strip()
+        if not query:
+            return HandlerResult.skipped('no search query to add to the queue')
+        result = self._resolve_spotify(query, request.text)
+        position = self.speaker.enqueue_spotify(result['uri'], result['title'])
+        return HandlerResult.handled(f"Dodano {result['title']} do kolejki", position=position,
+                                     **result)
+
+    def _resolve_spotify(self, query: str, text: str | None) -> dict:
+        """Route an utterance to a track, genre playlist or artist playlist."""
+        utterance = (text or '').casefold()
+        preferred = ('playlist' if 'playlist' in utterance else
+                      'album' if 'album' in utterance else
+                      'artist' if any(word in utterance for word in ('artyst', 'wykonawc', 'zespoł', 'zespol'))
+                      else None)
+        if preferred == 'artist':
+            return self.spotify.search_artist_playlist(query)
+        if any(word in utterance for word in ('utwór', 'utwor', 'piosenk')):
+            return self.spotify.search_track(query)
+        genre = (GENRES.get(' '.join(query.casefold().split()))
+                 if preferred in (None, 'playlist') else None)
+        if 'gatunk' in utterance:
+            genre = genre or query
+        if genre and preferred in (None, 'playlist'):
+            return self.spotify.search_genre_playlist(genre)
+        return self.spotify.search_best(query, preferred=preferred)
+
     def _play_default(self, source_label: str = '') -> HandlerResult:
-        """Bare "włącz muzykę": the configured Sonos favorite, else resume."""
+        """Bare music command: play the configured personal Sonos favorite."""
         if self.default_favorite:
             title = self.speaker.play_favorite(self.default_favorite)
             label = f' ({source_label})' if source_label else ''
             return HandlerResult.handled(f'Włączam {title}{label}', favorite=title)
-        if not source_label:
-            self.speaker.play()
-            return HandlerResult.handled('Wznawiam odtwarzanie')
-        # Spotify was requested but there is nothing configured to play.
-        return HandlerResult.skipped('no default favorite and no search query')
+        return HandlerResult.skipped('set default_favorite in Sonos settings to your playlist')
 
     def _volume(self, intent: str, request) -> HandlerResult:
         current = self.speaker.get_volume()
@@ -177,11 +215,29 @@ class SonosHandler(CommandHandler):
             except ValueError:
                 return HandlerResult.skipped(f'no usable volume level in {level!r}')
         elif intent == 'volume_up':
-            target = min(self.volume_max, current + self.volume_step)
+            step = self._volume_step(request)
+            if step is None:
+                return HandlerResult.skipped('invalid volume step')
+            if current >= self.volume_max:
+                return HandlerResult.skipped('volume is already at or above the configured maximum')
+            target = min(self.volume_max, current + step)
         else:
-            target = max(0, current - self.volume_step)
+            step = self._volume_step(request)
+            if step is None:
+                return HandlerResult.skipped('invalid volume step')
+            target = max(0, current - step)
         self.speaker.set_volume(target)
         return HandlerResult.handled(f'Głośność {target}', volume_from=current, volume_to=target)
+
+    def _volume_step(self, request) -> int | None:
+        raw = request.entities.get('level')
+        if raw is None or str(raw).strip() == '':
+            return self.volume_step
+        try:
+            step = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return step if step > 0 else None
 
 
 def create() -> SonosHandler:

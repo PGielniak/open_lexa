@@ -12,6 +12,6 @@ resources:
 images:
   - name: open-lexa-admin
     newName: ghcr.io/pgielniak/open-lexa-admin
-    newTag: 0.3.0-dual
-    # Built by Tekton PipelineRun open-lexa-admin-build-622lw.
-    digest: sha256:1b8425ac96e5cd4bc6686a59f08eee03283e8f89572d05b86bf6b36bdef89241
+    newTag: 162d4ca
+    # Built by Tekton PipelineRun open-lexa-admin-build-ngwsh.
+    digest: sha256:692b0d8394e74f4cf006f6881de9fe7a3a64802eb65c56dcbfe865ead331871d

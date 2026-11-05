@@ -11,7 +11,7 @@ resources:
 images:
   - name: open-lexa
     newName: ghcr.io/pgielniak/open-lexa
-    newTag: 0.4.0-dual
-    # Built by Tekton PipelineRun open-lexa-receiver-build-gn4sd.
+    newTag: 162d4ca
+    # Built by Tekton PipelineRun open-lexa-receiver-build-sltwg.
     # Pinning the digest keeps rollouts reproducible even if the tag moves.
-    digest: sha256:96c7640f9245db82bf395541d88fb662a788aaaf674fe25039abb8d2930a24aa
+    digest: sha256:4b59530fd221f26af2e7918c66016bbdccd86c456e8080b6cba265e75eb1631d

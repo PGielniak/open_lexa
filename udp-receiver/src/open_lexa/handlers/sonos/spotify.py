@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -19,8 +20,7 @@ LOG = logging.getLogger('open_lexa.handlers.sonos')
 
 TOKEN_URL = 'https://accounts.spotify.com/api/token'
 API_URL = 'https://api.spotify.com/v1'
-# Generic queries usually mean a track. Explicit playlist/album/artist
-# requests override this ordering in search_best.
+# Explicit track/playlist/album requests override this ordering in search_best.
 SEARCH_TYPES = ('track', 'album', 'playlist', 'artist')
 
 
@@ -88,15 +88,19 @@ class SpotifyClient:
     def search_best(self, query: str, preferred: str | None = None) -> dict:
         """Best playable match: {'uri', 'title', 'type'}.
 
-        When the utterance explicitly requested a playlist/artist/album,
-        prefer that category; otherwise a track takes precedence.
+        Exact artist-name matches use a playlist for that artist. Explicit
+        track requests bypass this rule; otherwise tracks take precedence.
         """
         query = (query or '').strip()
         if not query:
             raise SpotifyError('empty Spotify search query')
         result = self.search(query)
-        categories = ((preferred,) + tuple(t for t in SEARCH_TYPES if t != preferred)
-                      if preferred in SEARCH_TYPES else SEARCH_TYPES)
+        if preferred is None:
+            artists = ((result.get('artists') or {}).get('items')) or []
+            if any(item and (item.get('name') or '').casefold() == query.casefold()
+                   for item in artists):
+                return self.search_artist_playlist(query)
+        categories = ((preferred,) if preferred in ('playlist', 'album') else SEARCH_TYPES)
         for category in categories:
             items = ((result.get(f'{category}s') or {}).get('items')) or []
             for item in items:
@@ -119,3 +123,49 @@ class SpotifyClient:
                         title = f'{title} — {artists}' if artists else title
                     return {'uri': item['uri'], 'title': title, 'type': category}
         raise SpotifyError(f'nothing found on Spotify for {query!r}')
+
+    def search_track(self, query: str) -> dict:
+        """Search tracks only; do not fall back to an album or playlist."""
+        items = ((self.search(query, types=('track',)).get('tracks') or {}).get('items')) or []
+        for item in items:
+            if item and item.get('uri') and item.get('is_playable', True):
+                return {'uri': item['uri'], 'title': item.get('name') or query,
+                        'type': 'track'}
+        raise SpotifyError(f'no playable tracks found on Spotify for {query!r}')
+
+    @staticmethod
+    def _playlists(result: dict) -> list[dict]:
+        items = ((result.get('playlists') or {}).get('items')) or []
+        return [item for item in items if item and item.get('uri') and
+                (item.get('tracks') or {}).get('total', 1) != 0]
+
+    def search_artist_playlist(self, artist: str) -> dict:
+        """Find an artist's 'This Is' playlist, then a named artist playlist."""
+        artist = (artist or '').strip()
+        if not artist:
+            raise SpotifyError('empty artist name')
+        for query in (f'This Is {artist}', artist):
+            playlists = self._playlists(self.search(query, types=('playlist',), limit=20))
+            if query == artist:
+                named = [item for item in playlists
+                         if artist.casefold() in (item.get('name') or '').casefold()]
+            else:
+                named = [item for item in playlists
+                         if (item.get('name') or '').casefold() == query.casefold()]
+            if named:
+                # Prefer the editorial Spotify playlist when it exists.
+                named.sort(key=lambda item: (item.get('owner') or {}).get('id') != 'spotify')
+                chosen = named[0]
+                return {'uri': chosen['uri'], 'title': chosen.get('name') or artist,
+                        'type': 'playlist'}
+        raise SpotifyError(f'no playlist found for artist {artist!r}')
+
+    def search_genre_playlist(self, genre: str) -> dict:
+        """Pick a playable playlist from Spotify's most relevant genre results."""
+        result = self.search(genre, types=('playlist',), limit=10)
+        playlists = self._playlists(result)
+        if not playlists:
+            raise SpotifyError(f'no playlists found on Spotify for {genre!r}')
+        chosen = random.choice(playlists)
+        return {'uri': chosen['uri'], 'title': chosen.get('name') or genre,
+                'type': 'playlist'}

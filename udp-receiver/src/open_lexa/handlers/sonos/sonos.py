@@ -145,9 +145,17 @@ class SonosSpeaker:
         """Queue and play a spotify:track/album/playlist URI through ShareLink."""
         coordinator = self.coordinator
 
-        def operation():
-            from soco.plugins.sharelink import ShareLinkPlugin
-            index = ShareLinkPlugin(coordinator).add_share_link_to_queue(uri, dc_title=title)
-            coordinator.play_from_queue(index - 1)
+        index = self._call(f'adding {uri} to the queue',
+                           self._add_share_link, coordinator, uri, title)
+        self._call(f'playing {uri} from queue position {index}',
+                   coordinator.play_from_queue, index - 1)
 
-        self._call(f'playing {uri}', operation)
+    @staticmethod
+    def _add_share_link(coordinator, uri: str, title: str) -> int:
+        from soco.plugins.sharelink import ShareLinkPlugin
+        return ShareLinkPlugin(coordinator).add_share_link_to_queue(uri, dc_title=title)
+
+    def enqueue_spotify(self, uri: str, title: str = '') -> int:
+        """Append a Spotify item without changing the current transport state."""
+        return self._call(f'adding {uri} to the queue', self._add_share_link,
+                          self.coordinator, uri, title)

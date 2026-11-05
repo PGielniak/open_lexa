@@ -81,11 +81,34 @@ the voice handler use the same SoCo adapter. A group routes transport/queue
 commands to its coordinator. SoCo must be able to reach the speaker's LAN IP
 from the receiver pod; verify networking/firewall before debugging NLU.
 
-The plugin maps `play_spotify`, `play_music`, `play_radio`, `stop`, `pause`,
-`resume`, `next_track`, `previous_track`, and volume intents to SoCo. Spotify
-search returns a URI and SoCo's ShareLink plugin queues it; artist results
-are resolved to playable tracks. A failed action is archived as `execution`
-metadata without suppressing subsequent recordings.
+Add your personal Spotify playlist to **Sonos Favorites**, then enter its
+exact name in **Ustawienia → Sonos / Spotify → Moja domyślna playlista**
+(`default_favorite`). Client-credentials Spotify search cannot access a user's
+private playlists; this favorite is the way to play a personal/private one.
+Bare “włącz muzykę”, “włącz Spotify” or “puść moją playlistę” play that favorite.
+Without a configured favorite, the command is skipped instead of resuming
+unrelated audio. “Wznów” still resumes playback.
+
+| Example voice command | Action |
+| --- | --- |
+| “Puść Drum and Bass na Spotify” | Random nonempty playlist from the top 10 Spotify genre results |
+| “Puść playlistę rock” | Random rock playlist |
+| “Puść muzykę gatunku synthwave” | Random playlist for any explicitly named genre |
+| “Puść artystę Pendulum” / “Puść Pendulum na Spotify” | Artist's “This Is …” playlist when available, otherwise a named artist playlist; exact artist-name recognition for the latter form |
+| “Puść utwór Bohemian Rhapsody na Spotify” | Search tracks only and play the best playable result |
+| “Dodaj utwór Bohemian Rhapsody do kolejki” | Append to the Sonos queue without interrupting playback |
+| “Dodaj do kolejki Drum and Bass” | Append a random genre playlist to the queue |
+| “Następna piosenka”, “poprzednia piosenka”, “pauza”, “wznów”, “stop” | Transport controls |
+| “Podgłośnij o pięć”, “przycisz o 10”, “ustaw głośność na 20 procent” | Relative or absolute volume, bounded by `volume_max` |
+
+Genre detection uses an explicit list in `handlers/sonos/handler.py`; other
+queries use Spotify catalog search. An explicit playlist/album request does
+not silently fall back to a track. Sonos group transport and queue operations
+target the coordinator. A failed action is archived as `execution` metadata
+without suppressing subsequent recordings. Redeploy both admin (to export the
+new lexicon phrases) and receiver (for the handler), and verify Spotify is
+linked in the Sonos app. Integration with live Sonos hardware is not covered
+by the mocked unit tests.
 
 ## Whisper model comparison
 

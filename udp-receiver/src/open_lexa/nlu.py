@@ -137,7 +137,7 @@ def parse_lexicon(data: dict) -> Lexicon:
             if compiled is not None:
                 prefix = phonetic(phrase.split('{', 1)[0])
                 suffix = phonetic(phrase.rsplit('}', 1)[-1])
-                specificity = 106.0 if suffix or len(prefix.split()) >= 2 else 85.0
+                specificity = 115.0 if suffix or len(prefix.split()) >= 2 else 85.0
                 templates.append(_Template(compiled[0], compiled[1], name, specificity,
                                            len(prefix.split()), len(suffix.split())))
             else:
@@ -213,6 +213,7 @@ def match(text: str | None, lexicon: Lexicon) -> Decision | None:
     squeezed = compact(text)
     scores: dict[str, float] = {}
     sources: dict[str, str] = {}
+    exact_literals: set[str] = set()
 
     def track(intent: str, score: float, source: str) -> None:
         if score > scores.get(intent, 0.0):
@@ -223,16 +224,18 @@ def match(text: str | None, lexicon: Lexicon) -> Decision | None:
         score = max(fuzz.token_set_ratio(folded, example.phonetic),
                     fuzz.ratio(squeezed, example.compact))
         if squeezed == example.compact:
-            score = 110.0
+            score = 125.0
         track(example.intent, float(score), 'lexicon')
     for phrase_phonetic, phrase_compact, intent in lexicon.literals:
         score = max(fuzz.token_set_ratio(folded, phrase_phonetic),
                     fuzz.ratio(squeezed, phrase_compact))
         if squeezed == phrase_compact:
-            score = 110.0
+            score = 125.0
+            exact_literals.add(intent)
         track(intent, float(score), 'canonical')
 
     slot_values: dict[str, dict[str, str]] = {}
+    slot_specificity: dict[str, tuple[float, int, int]] = {}
     for template in lexicon.templates:
         found = template.regex.fullmatch(folded)
         if found is None:
@@ -253,8 +256,11 @@ def match(text: str | None, lexicon: Lexicon) -> Decision | None:
         for slot, value in captured.items():
             if lexicon.entities.get(slot, {}).get('kind') == 'number':
                 captured[slot] = _extract_number(value) or value
-        slot_values.setdefault(template.intent, {}).update(
-            {key: value for key, value in captured.items() if value})
+        specificity = (score, template.prefix_words + template.suffix_words,
+                       template.prefix_words)
+        if specificity > slot_specificity.get(template.intent, (0.0, 0, 0)):
+            slot_values[template.intent] = {key: value for key, value in captured.items() if value}
+            slot_specificity[template.intent] = specificity
 
     if not scores:
         return None
@@ -264,7 +270,9 @@ def match(text: str | None, lexicon: Lexicon) -> Decision | None:
     if best < ACCEPT_SCORE or (best - runner_up) < MARGIN:
         return None
     info = lexicon.intents.get(intent, {})
-    entities = dict(slot_values.get(intent, {}))
+    # An exact command without slots (e.g. "włącz muzykę ze Spotify") must
+    # not inherit a slot from a more generic template for the same intent.
+    entities = {} if intent in exact_literals else dict(slot_values.get(intent, {}))
     entities.update(_extract_entities(text or '', info.get('entities', []),
                                       lexicon.entities, entities))
     if not info.get('actionable', True):

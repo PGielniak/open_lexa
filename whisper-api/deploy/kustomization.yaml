@@ -10,7 +10,7 @@ resources:
 images:
   - name: open-lexa-whisper-hailo
     newName: ghcr.io/pgielniak/open-lexa-whisper-hailo
-    newTag: 0.2.0-hailort5.4.0-whisper-small
-    # Built by Tekton PipelineRun open-lexa-whisper-api-build-9x74h.
+    newTag: 162d4ca
+    # Built by Tekton PipelineRun open-lexa-whisper-api-build-2w7wj.
     # Pinning the digest keeps rollouts reproducible even if the tag moves.
-    digest: sha256:648a60042d84829ba68f96b397ef2e63c25570ccb8684a0141e6c08225c4c883
+    digest: sha256:756d8891d381ef3d1c237c82508fe30cd71c2aa0bce6a4e89600afac65bb4940

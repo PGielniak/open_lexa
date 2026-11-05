@@ -67,6 +67,11 @@ Do not commit `secret.example.yaml` values or a real Secret manifest.
 
 The receiver kustomization owns the `open-lexa` namespace, so apply it first.
 The receiver also reads the `open-lexa-smb` Secret (see "SMB archive").
+If the cluster uses a different `SMB_SERVER` than the example ConfigMaps,
+preserve that live override (or supply an environment-specific Kustomize
+overlay) before applying the full kustomizations; otherwise the archive can
+become unreachable. The `162d4ca` deployment updated images and only the
+Whisper/model ConfigMap fields, retaining the live SMB address.
 
 ```sh
 kubectl apply -k udp-receiver/deploy
