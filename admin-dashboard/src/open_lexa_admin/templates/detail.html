@@ -3,6 +3,7 @@
 {% block content %}
 <p><a href="/recordings?status=new">← lista</a></p>
 <h1>{{ r.recorded_at[:19].replace('T', ' ') }} UTC <span class="chip status-{{ r.status }}">{{ r.status }}</span></h1>
+{% if annotation.source == 'llm' %}<p class="muted">LLM: {{ annotation.status }} · {{ annotation.model }}{% if annotation.reviewed_at %} · zweryfikowano ręcznie {{ annotation.reviewed_at }}{% endif %}{% if annotation.error %} · błąd: {{ annotation.error }}{% endif %}</p>{% endif %}
 {% if saved and not warnings %}<div class="notice ok">Zapisano.</div>{% endif %}
 {% for w in warnings %}<div class="notice warn">{{ w }}</div>{% endfor %}
 
@@ -35,6 +36,7 @@
   {% endif %}
 </div>
 
+{% if r.status == 'new' %}<form method="post" action="/recordings/{{ r.id }}/annotate" style="margin:14px 0"><button type="submit">Oznacz to nagranie przez LLM</button></form>{% endif %}
 <form method="post" class="panel" style="margin-top:14px" id="label-form">
   <label for="corrected">Poprawna transkrypcja</label>
   <p class="muted" style="margin:0 0 5px;font-size:13px">Domyślnie wypełniona transkrypcją GPT z chmury. Popraw tylko wtedy, gdy GPT się pomylił.</p>

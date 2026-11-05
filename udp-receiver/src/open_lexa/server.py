@@ -21,10 +21,13 @@ from .store import create_store
 from .archive import Archive, create_archive
 from .audio import wav_bytes
 from .commands import Decision, decide
+from .handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH, Dispatcher, validate_config
+from .nlu import LEXICON_PATH, NLU
 from .protocol import CHUNK, HEADER, RATE, Receiver, Recording, parse_token
 from .settings import SettingsWatcher
 from .stt import (BACKENDS, ConfigError, Transcriber, create_transcriber, format_errors,
                   preferred_result, transcribe_all, transcripts_meta)
+from .watch import JsonWatcher
 
 LOG = logging.getLogger('open_lexa')
 
@@ -41,6 +44,7 @@ class HealthState:
     archive_failures: int = 0
     last_recording: float | None = None
     last_error: str | None = None
+    handlers: dict = field(default_factory=dict)
 
     def snapshot(self) -> dict:
         return {
@@ -55,6 +59,7 @@ class HealthState:
             'archive_failures': self.archive_failures,
             'last_recording': self.last_recording,
             'last_error': self.last_error,
+            'handlers': self.handlers,
         }
 
 
@@ -161,9 +166,13 @@ def reload_transcriber(settings: SettingsWatcher, current: Transcriber | None,
 def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
            save_dir: Path | None, state: HealthState, *,
            handle: Callable[[str | None], Decision] = decide, archive: Archive | None = None,
-           settings: SettingsWatcher | None = None) -> None:
+           settings: SettingsWatcher | None = None, nlu: NLU | None = None,
+           lexicon: JsonWatcher | None = None, dispatcher: Dispatcher | None = None,
+           handlers_config: JsonWatcher | None = None) -> None:
     writer = ArchiveWriter(archive, state) if archive is not None else None
     applied = 0  # settings.version the current transcriber was built from; 0 = environment
+    applied_lexicon = 0
+    applied_handlers = 0
     override: str | None = None
     if transcriber is not None:
         try:
@@ -189,6 +198,14 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 applied = settings.version
                 if (reloaded := reload_transcriber(settings, transcriber, state)) is not None:
                     transcriber, override = reloaded
+            if nlu is not None and lexicon is not None and lexicon.version != applied_lexicon:
+                applied_lexicon = lexicon.version
+                nlu.update(lexicon.data)
+            if dispatcher is not None and handlers_config is not None \
+                    and handlers_config.version != applied_handlers:
+                applied_handlers = handlers_config.version
+                dispatcher.apply_config(handlers_config.data)
+                state.handlers = dispatcher.summary()
             lang = override or language
             if transcriber is None:
                 print(f'[dry-run] {recording.peer[0]}: {len(recording.pcm) / (RATE * 2):.2f} s, '
@@ -215,14 +232,28 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 else:
                     LOG.info('STT returned an empty transcript')
                 decision = handle(text)
+                execution = None
+                if dispatcher is not None and decision.intent:
+                    # A failing handler never affects recognition or archiving.
+                    execution = dispatcher.dispatch(decision, text=text, stem=stem,
+                                                    session=f'{recording.session:08x}')
                 if writer is not None:
+                    nlu_meta = ({'intent': decision.intent} if decision.intent else {})
+                    if decision.entities:
+                        nlu_meta['entities'] = decision.entities_dict
+                    if decision.score is not None:
+                        nlu_meta['score'] = decision.score
+                    if decision.source is not None:
+                        nlu_meta['source'] = decision.source
+                    if execution is not None:
+                        nlu_meta['execution'] = execution
                     writer.submit(stem, recording, text=text, language=lang,
                                   backend=transcriber.name,
                                   model=chosen.model or getattr(transcriber, 'model', None),
                                   corrected_text=text,
                                   corrected_source=chosen.role or transcriber.name,
                                   transcripts=transcripts_meta(results),
-                                  command=decision.command, reply=decision.reply)
+                                  command=decision.command, reply=decision.reply, **nlu_meta)
         except Exception as exc:
             # One failed request must not kill the receiver or stop the next recording.
             state.failures += 1
@@ -238,6 +269,8 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
             LOG.exception('STT backend shutdown failed')
     if writer is not None:
         writer.close()
+    if dispatcher is not None:
+        dispatcher.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -257,8 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--save-dir', type=Path,
                         help='Optionally keep received WAVs (default: OPEN_LEXA_SAVE_DIR)')
     parser.add_argument('--settings-seconds', type=float,
-                        help='Poll the admin STT settings on SMB every N s, 0 disables '
+                        help='Poll the admin STT/handler settings on SMB every N s, 0 disables '
                              '(default: OPEN_LEXA_SETTINGS_SECONDS or 30)')
+    parser.add_argument('--lexicon-seconds', type=float,
+                        help='Poll the NLU lexicon on SMB every N s, 0 disables '
+                             '(default: OPEN_LEXA_LEXICON_SECONDS or 60)')
     parser.add_argument('--dry-run', action='store_true', help='Receive audio without initialising an STT backend')
     return parser
 
@@ -317,11 +353,29 @@ def main():
             settings_seconds = float(os.environ.get('OPEN_LEXA_SETTINGS_SECONDS', '30'))
         except ValueError:
             parser.error('OPEN_LEXA_SETTINGS_SECONDS must be a number')
+    lexicon_seconds = args.lexicon_seconds
+    if lexicon_seconds is None:
+        try:
+            lexicon_seconds = float(os.environ.get('OPEN_LEXA_LEXICON_SECONDS', '60'))
+        except ValueError:
+            parser.error('OPEN_LEXA_LEXICON_SECONDS must be a number')
+    # NLU lexicon and handler plugins ride the same archive as the recordings;
+    # without it the receiver keeps the built-in regex rules and logs commands.
+    nlu = lexicon = dispatcher = handlers_config = None
+    if archive is not None:
+        nlu = NLU()
+        dispatcher = Dispatcher()
+        if lexicon_seconds > 0:
+            lexicon = JsonWatcher(create_store(), LEXICON_PATH, interval=lexicon_seconds)
+        if settings_seconds > 0:
+            handlers_config = JsonWatcher(create_store(), HANDLERS_CONFIG_PATH,
+                                          interval=settings_seconds, validate=validate_config)
     if archive is not None and settings_seconds > 0 and not args.backend and not args.model:
         settings = SettingsWatcher(create_store(), lambda: create_transcriber(backend),
                                    interval=settings_seconds)
     state = HealthState(transcriber.name if transcriber is not None else 'dry-run',
-                        ready=args.dry_run)
+                        ready=args.dry_run,
+                        handlers=dispatcher.summary() if dispatcher is not None else {})
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -352,11 +406,18 @@ def main():
         sock.settimeout(0.5)
         thread = threading.Thread(
             target=worker, args=(jobs, transcriber, language, save_dir, state),
-            kwargs={'archive': archive, 'settings': settings},
+            kwargs={'archive': archive, 'settings': settings,
+                    'handle': nlu.decide if nlu is not None else decide,
+                    'nlu': nlu, 'lexicon': lexicon,
+                    'dispatcher': dispatcher, 'handlers_config': handlers_config},
             daemon=True, name='stt')
         thread.start()
         if settings is not None:
             settings.start()
+        if lexicon is not None:
+            lexicon.start()
+        if handlers_config is not None:
+            handlers_config.start()
         if health_port:
             httpd = start_health_server(health_port, state)
         LOG.info('Listening on %s:%d/UDP; backend=%s; language=%s; archive=%r',
@@ -390,6 +451,10 @@ def main():
             thread.join(timeout=20)
             if settings is not None:
                 settings.stop()
+            if lexicon is not None:
+                lexicon.stop()
+            if handlers_config is not None:
+                handlers_config.stop()
             if httpd is not None:
                 httpd.shutdown()
                 httpd.server_close()

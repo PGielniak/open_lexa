@@ -17,13 +17,20 @@
   </div>
 
   <fieldset data-mode="local">
-    <legend>Lokalne Whisper API</legend>
+    <legend>Lokalne Whisper API (Hailo)</legend>
     <div class="row">
       <div style="flex-basis:320px"><label for="local_url">URL (OpenAI-compatible, z <span class="mono">/v1</span>)</label>
         <input type="url" id="local_url" name="local_url" value="{{ s.local_url }}" required></div>
-      <div><label for="local_model">Model</label>
-        <input type="text" id="local_model" name="local_model" value="{{ s.local_model }}"></div>
+      <div><label for="local_model">Model Whispera na Hailo</label>
+        <input type="text" id="local_model" name="local_model" value="{{ s.local_model }}" list="local-models">
+        <datalist id="local-models">
+          <option value="whisper-base">Base — lepszy dla polskiego, szybszy</option>
+          <option value="whisper-small">Small — dokładniejszy dla trudnego audio</option>
+          <option value="whisper-1">domyślny model API</option>
+        </datalist>
+        <p class="muted" style="font-size:12px;margin:4px 0 0">Przełączenie ładuje wybrany HEF na Hailo przy następnym nagraniu (bez restartu usługi).</p></div>
     </div>
+    <p id="whisper-model-status" class="muted" style="font-size:13px">Sprawdzam dostępne modele…</p>
   </fieldset>
 
   <fieldset data-mode="cloud">
@@ -50,6 +57,119 @@
   <button class="primary">Zapisz</button>
 </form>
 
+<form method="post" action="/settings/llm" class="panel" style="margin-top:16px" id="llm-form">
+  <h2 style="margin-top:0">LLM — automatyczne oznaczanie nagrań</h2>
+  <p class="muted" style="margin-top:0">Osobny klucz API do modelu językowego (OpenAI-compatible). LLM przypisuje intencję i encje do nowych nagrań — tworzy brakujące pozycje słownika. Etykiety pozostają edytowalne; każde oznaczenie dostaje adnotację „LLM”.</p>
+  <div class="row">
+    <div style="flex-basis:320px"><label for="llm_url">Bazowy URL (Chat Completions)</label>
+      <input type="url" id="llm_url" name="url" value="{{ llm.url }}"></div>
+    <div><label for="llm_model">Model</label>
+      <input type="text" id="llm_model" name="model" value="{{ llm.model }}"></div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <div style="flex-basis:320px"><label for="llm_api_key">Klucz API LLM{% if llm_key_hint %} (zapisany: <span class="mono">{{ llm_key_hint }}</span>; puste pole zostawia obecny){% endif %}</label>
+      <input type="password" id="llm_api_key" name="api_key" autocomplete="off" placeholder="{{ 'bez zmian' if llm_key_hint else 'sk-…' }}"></div>
+    {% if llm_key_hint %}<div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="clear_llm_api_key" value="1"> usuń klucz</label></div>{% endif %}
+  </div>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:0 1 120px"><label for="llm_batch">Partia (ile nagrań na cykl)</label>
+      <input type="text" id="llm_batch" name="batch_size" value="{{ llm.batch_size }}"></div>
+    <div style="flex:0 1 120px"><label for="llm_timeout">Timeout [s]</label>
+      <input type="text" id="llm_timeout" name="timeout" value="{{ llm.timeout }}"></div>
+    <div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="auto_label" value="1"{% if llm.auto_label %} checked{% endif %}> oznaczaj nowe nagrania automatycznie</label></div>
+  </div>
+  <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+    <button class="primary">Zapisz</button>
+    <button type="button" id="llm-test">Test połączenia</button>
+    <span id="llm-test-result" class="muted" style="font-size:13px"></span>
+  </div>
+</form>
+
+<form method="post" action="/settings/sonos" class="panel" style="margin-top:16px" id="sonos-form">
+  <h2 style="margin-top:0">Sonos / Spotify — handler poleceń</h2>
+  <p class="muted" style="margin-top:0">Konfiguracja trafia do <span class="mono">_config/handlers.json</span> na udziale SMB; odbiornik wykonuje nią intencje muzyczne i głośności przez SoCo. Wyszukiwanie „puść &lt;coś&gt; na Spotify” wymaga konta Spotify podpiętego w aplikacji Sonos oraz credentials aplikacji ze <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> (Client Credentials; wystarczy darmowe konto).</p>
+  <div>
+    <label class="inline"><input type="checkbox" name="enabled" value="1"{% if sonos.enabled %} checked{% endif %}> włącz handler Sonos</label>
+  </div>
+  <fieldset{% if not sonos.enabled %} disabled{% endif %} id="sonos-fields">
+    <legend>Głośnik</legend>
+    <div class="row">
+      <div style="flex-basis:220px"><label for="speaker_ip">Adres IP głośnika (lub koordynatora grupy)</label>
+        <input type="text" id="speaker_ip" name="speaker_ip" value="{{ sonos.speaker_ip }}" placeholder="192.168.1.42"></div>
+      <div><label for="default_favorite">Domyślny ulubiony Sonos („włącz muzykę”)</label>
+        <input type="text" id="default_favorite" name="default_favorite" value="{{ sonos.default_favorite }}" placeholder="np. nazwa playlisty Spotify w Ulubionych"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:0 1 120px"><label for="volume_step">Krok głośności</label>
+        <input type="text" id="volume_step" name="volume_step" value="{{ sonos.volume_step }}"></div>
+      <div style="flex:0 1 120px"><label for="volume_max">Maks. głośność</label>
+        <input type="text" id="volume_max" name="volume_max" value="{{ sonos.volume_max }}"></div>
+      <div style="flex:0 1 120px"><label for="sonos_timeout">Timeout [s]</label>
+        <input type="text" id="sonos_timeout" name="timeout" value="{{ sonos.timeout }}"></div>
+    </div>
+  </fieldset>
+  <fieldset{% if not sonos.enabled %} disabled{% endif %} class="sonos-fields">
+    <legend>Spotify — wyszukiwanie po nazwie</legend>
+    <div class="row">
+      <div style="flex-basis:280px"><label for="spotify_client_id">Client ID</label>
+        <input type="text" id="spotify_client_id" name="spotify_client_id" value="{{ sonos.spotify_client_id }}" autocomplete="off"></div>
+      <div style="flex-basis:280px"><label for="spotify_client_secret">Client Secret{% if spotify_secret_hint %} (zapisany: <span class="mono">{{ spotify_secret_hint }}</span>; puste pole zostawia obecny){% endif %}</label>
+        <input type="password" id="spotify_client_secret" name="spotify_client_secret" autocomplete="off" placeholder="{{ 'bez zmian' if spotify_secret_hint else '—' }}"></div>
+      {% if spotify_secret_hint %}<div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="clear_spotify_secret" value="1"> usuń</label></div>{% endif %}
+      <div style="flex:0 1 100px"><label for="spotify_market">Rynek</label>
+        <input type="text" id="spotify_market" name="spotify_market" value="{{ sonos.spotify_market }}"></div>
+    </div>
+  </fieldset>
+  <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+    <button class="primary">Zapisz</button>
+    <button type="button" id="sonos-test">Test głośnika</button>
+    <span id="sonos-test-result" class="muted" style="font-size:13px"></span>
+  </div>
+</form>
+
+<div class="panel" style="margin-top:16px">
+  <h2 style="margin-top:0">Sterowanie głośnikiem</h2>
+  <p class="muted">Komendy testowe używają tego samego handlera co polecenia głosowe. Najpierw zapisz i włącz Sonos.</p>
+  <div class="row">
+    <div><label for="favorite-name">Ulubiony Sonos / zapisana playlista</label><input id="favorite-name" type="text" placeholder="nazwa (puste: pierwszy ulubiony)"></div>
+    <div><label for="search-name">Szukaj na Spotify</label><input id="search-name" type="text" placeholder="utwór, album, artysta lub playlista"></div>
+    <div style="flex:0 1 110px"><label for="set-volume">Głośność 0–100</label><input id="set-volume" type="text" value="20"></div>
+  </div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
+    <button type="button" data-sonos-action="favorite">Ulubiony</button>
+    <button type="button" data-sonos-action="search">Szukaj i graj</button>
+    <button type="button" data-sonos-action="play">Graj</button>
+    <button type="button" data-sonos-action="pause">Pauza</button>
+    <button type="button" data-sonos-action="resume">Wznów</button>
+    <button type="button" data-sonos-action="stop">Stop</button>
+    <button type="button" data-sonos-action="next">Następny</button>
+    <button type="button" data-sonos-action="previous">Poprzedni</button>
+    <button type="button" data-sonos-action="volume_down">Ciszej</button>
+    <button type="button" data-sonos-action="volume_up">Głośniej</button>
+    <button type="button" data-sonos-action="volume_set">Ustaw głośność</button>
+  </div>
+  <p id="sonos-control-result" class="muted" aria-live="polite"></p>
+</div>
+
+<div class="panel" style="margin-top:16px">
+  <h2 style="margin-top:0">Zainstalowane handlery poleceń</h2>
+  <p class="muted" style="margin-top:0">Handlery to wtyczki odbiornika (<span class="mono">open_lexa/handlers/&lt;folder&gt;</span>): każdy dostaje rozpoznaną intencję i encje. Włączenie i parametry — w sekcji wyżej; odbiornik czyta <span class="mono">_config/handlers.json</span> co ~30 s.</p>
+  <table>
+    <thead><tr><th>ID</th><th>Wersja</th><th>Intencje</th><th>Włączony</th></tr></thead>
+    <tbody>
+    {% for p in plugins %}
+    <tr><td class="mono">{{ p.id }}</td><td>{{ p.version }}</td>
+        <td>{% for i in p.intents %}<span class="chip">{{ i }}</span> {% endfor %}</td>
+        <td><form method="post" action="/settings/handlers/{{ p.id }}">
+          <label class="inline"><input type="checkbox" name="enabled" value="1"{% if p.enabled %} checked{% endif %} onchange="this.form.submit()"> {{ 'tak' if p.enabled else 'nie' }}</label>
+        </form></td></tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">Brak zainstalowanych handlerów.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
 <script>
 (() => {
   const form = document.getElementById('settings-form');
@@ -63,6 +183,85 @@
   }
   form.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('change', refresh));
   refresh();
+  fetch('/settings/whisper-models').then(r => r.json()).then(data => {
+    const status = document.getElementById('whisper-model-status');
+    if (data.ok) {
+      status.textContent = `Dostępne: ${data.models.join(', ')} · Załadowany: ${data.loaded_model || 'nieznany'}`;
+      const list = document.getElementById('local-models');
+      list.replaceChildren(...data.models.map(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        return option;
+      }));
+    } else {
+      status.textContent = `Nie mogę odczytać modeli: ${data.error}`;
+    }
+  }).catch(() => { document.getElementById('whisper-model-status').textContent = 'Whisper API niedostępne'; });
+
+  const sonosForm = document.getElementById('sonos-form');
+  const sonosToggle = sonosForm.querySelector('input[name=enabled]');
+  function refreshSonos() {
+    sonosForm.querySelectorAll('fieldset').forEach(f => f.disabled = !sonosToggle.checked);
+  }
+  sonosToggle.addEventListener('change', refreshSonos);
+
+  async function testConnection(buttonId, resultId, url, fields) {
+    const button = document.getElementById(buttonId);
+    const result = document.getElementById(resultId);
+    button.disabled = true;
+    result.textContent = 'testuję…';
+    try {
+      const body = new FormData();
+      for (const [name, selector] of Object.entries(fields)) {
+        const input = document.querySelector(selector);
+        if (input) body.append(name, input.value);
+      }
+      const response = await fetch(url, {method: 'POST', body});
+      const data = await response.json();
+      if (data.ok) {
+        result.textContent = data.message || (data.info
+          ? `OK: ${data.info.name} — ${data.info.state || '?'}${data.info.track?.title ? ', ' + data.info.track.title : ''}, głośność ${data.info.volume}`
+          : 'OK');
+        result.style.color = 'var(--ok)';
+      } else {
+        result.textContent = 'Błąd: ' + data.error;
+        result.style.color = 'var(--bad)';
+      }
+    } catch (exc) {
+      result.textContent = 'Błąd: ' + exc;
+      result.style.color = 'var(--bad)';
+    } finally {
+      button.disabled = false;
+    }
+  }
+  document.getElementById('llm-test').addEventListener('click', () => testConnection(
+    'llm-test', 'llm-test-result', '/settings/llm-test',
+    {url: '#llm_url', model: '#llm_model', api_key: '#llm_api_key'}));
+  document.getElementById('sonos-test').addEventListener('click', () => testConnection(
+    'sonos-test', 'sonos-test-result', '/settings/sonos-test', {speaker_ip: '#speaker_ip'}));
+  document.querySelectorAll('[data-sonos-action]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const status = document.getElementById('sonos-control-result');
+      const body = new FormData();
+      body.append('action', button.dataset.sonosAction);
+      body.append('favorite', document.getElementById('favorite-name').value);
+      body.append('query', document.getElementById('search-name').value);
+      body.append('level', document.getElementById('set-volume').value);
+      button.disabled = true;
+      status.textContent = 'wysyłam…';
+      try {
+        const response = await fetch('/settings/sonos-control', {method: 'POST', body});
+        const result = await response.json();
+        status.textContent = result.response || result.error || result.status;
+        status.style.color = result.ok ? 'var(--ok)' : 'var(--bad)';
+      } catch (error) {
+        status.textContent = String(error);
+        status.style.color = 'var(--bad)';
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
 })();
 </script>
 {% endblock %}

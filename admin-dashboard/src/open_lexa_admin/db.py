@@ -6,6 +6,7 @@ SMB/CIFS is unreliable). Raw recordings stay on SMB; this file only references t
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import json
 import logging
 import re
@@ -111,7 +112,10 @@ SCHEMA_V3 = """
 ALTER TABLE recordings ADD COLUMN transcripts TEXT;
 ALTER TABLE recordings ADD COLUMN corrected_source TEXT;
 """
-MIGRATIONS = (SCHEMA_V1, SCHEMA_V2, SCHEMA_V3)
+SCHEMA_V4 = """
+ALTER TABLE recordings ADD COLUMN annotation TEXT;
+"""
+MIGRATIONS = (SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4)
 
 # (name, parent, actionable, description, entity types, phrases)
 SEED_INTENTS = (
@@ -119,10 +123,16 @@ SEED_INTENTS = (
      ('włącz muzykę', 'puść muzykę', 'zagraj coś', 'play music')),
     ('play_spotify', 'play_music', 1, 'Odtwórz ze Spotify, opcjonalnie wyszukaj', ('search_query',),
      ('włącz spotify', 'puść {search_query} na spotify', 'włącz {search_query} ze spotify',
-      'play {search_query} on spotify')),
+      'play {search_query} on spotify', 'puść playlistę {search_query}',
+      'włącz playlistę {search_query}', 'puść {search_query} ze spotify')),
     ('play_radio', 'play_music', 1, 'Odtwórz stację radiową', ('station',),
      ('włącz radio', 'włącz {station}', 'puść radio {station}')),
     ('stop', None, 1, 'Zatrzymaj odtwarzanie', (), ('stop', 'wyłącz muzykę', 'zatrzymaj')),
+    ('pause', None, 1, 'Pauza — zatrzymaj chwilowo', (), ('pauza', 'zatrzymaj chwilowo')),
+    ('resume', None, 1, 'Wznów odtwarzanie', (), ('wznów', 'wznów muzykę', 'graj dalej')),
+    ('next_track', None, 1, 'Następny utwór', (), ('następny utwór', 'zmień utwór', 'dalej')),
+    ('previous_track', None, 1, 'Poprzedni utwór', (),
+     ('poprzedni utwór', 'wróć do poprzedniej piosenki', 'cofnij utwór')),
     ('volume_up', None, 1, 'Głośniej', ('level',), ('głośniej', 'podgłośnij')),
     ('volume_down', None, 1, 'Ciszej', ('level',), ('ciszej', 'przycisz')),
     ('volume_set', None, 1, 'Ustaw głośność', ('level',), ('ustaw głośność na {level}', 'głośność {level}')),
@@ -148,6 +158,24 @@ SEED_VALUES = (
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+@contextmanager
+def atomic(conn: sqlite3.Connection):
+    """An independently rollbackable savepoint, including inside a transaction."""
+    if not conn.in_transaction:
+        with conn:
+            yield
+        return
+    conn.execute('SAVEPOINT open_lexa_label')
+    try:
+        yield
+    except BaseException:
+        conn.execute('ROLLBACK TO SAVEPOINT open_lexa_label')
+        conn.execute('RELEASE SAVEPOINT open_lexa_label')
+        raise
+    else:
+        conn.execute('RELEASE SAVEPOINT open_lexa_label')
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -441,7 +469,7 @@ def save_label(conn: sqlite3.Connection, recording_id: int, *, corrected_transcr
         raise ValueError(f'invalid status {status!r}')
     warnings: list[str] = []
     corrected = corrected_transcript.strip()
-    with conn:
+    with atomic(conn):
         intent_id = None
         if intent:
             row = conn.execute('SELECT id FROM intents WHERE name = ?', (intent,)).fetchone()
@@ -480,6 +508,78 @@ def save_label(conn: sqlite3.Connection, recording_id: int, *, corrected_transcr
     return warnings
 
 
+# --- LLM annotation ---------------------------------------------------------------------
+
+INTENT_NAME = re.compile(r'^[a-z][a-z0-9_]{1,40}$')
+MAX_ANNOTATION_ATTEMPTS = 3
+
+
+def set_annotation(conn: sqlite3.Connection, recording_id: int, annotation: dict) -> None:
+    with atomic(conn):
+        conn.execute('UPDATE recordings SET annotation = ? WHERE id = ?',
+                     (json.dumps(annotation, ensure_ascii=False), recording_id))
+
+
+def annotation_of(row) -> dict:
+    """Parse a recording row's annotation column."""
+    try:
+        parsed = json.loads(row['annotation']) if row['annotation'] else None
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def pending_annotation(conn: sqlite3.Connection, limit: int = 10) -> list[sqlite3.Row]:
+    """'new' recordings with a transcript that the LLM has not (yet) labeled.
+
+    Failed annotations are retried up to :data:`MAX_ANNOTATION_ATTEMPTS` times.
+    """
+    return conn.execute(
+        'SELECT * FROM recordings WHERE status = \'new\' '
+        "AND coalesce(corrected_transcript, original_transcript) IS NOT NULL "
+        "AND coalesce(corrected_transcript, original_transcript) != '' "
+        'AND (annotation IS NULL '
+        "     OR (json_extract(annotation, '$.status') = 'error' "
+        f"         AND coalesce(json_extract(annotation, '$.attempts'), 0) < {MAX_ANNOTATION_ATTEMPTS})) "
+        'ORDER BY recorded_at, id LIMIT ?', (limit,)).fetchall()
+
+
+def ensure_intent(conn: sqlite3.Connection, name: str, *, description: str | None = None,
+                  phrases: Iterable[str] = (), parent: str | None = None) -> int:
+    """Return the intent id, creating a new (actionable) intent when missing."""
+    row = conn.execute('SELECT id FROM intents WHERE name = ?', (name,)).fetchone()
+    if row:
+        return row[0]
+    with atomic(conn):
+        cursor = conn.execute(
+            'INSERT INTO intents (name, parent_id, description, is_actionable) '
+            'VALUES (?, (SELECT id FROM intents WHERE name = ?), ?, 1)',
+            (name, parent, description or f'Utworzona automatycznie (LLM) {utcnow()}'))
+        intent_id = cursor.lastrowid
+        for phrase in phrases:
+            phrase = str(phrase).strip()
+            if phrase:
+                conn.execute('INSERT OR IGNORE INTO intent_phrases (intent_id, phrase) VALUES (?, ?)',
+                             (intent_id, phrase))
+    LOG.info('LLM created intent %r', name)
+    return intent_id
+
+
+def ensure_entity_type(conn: sqlite3.Connection, name: str, kind: str = 'text',
+                       description: str | None = None) -> int:
+    """Return the entity type id, creating it when missing."""
+    row = conn.execute('SELECT id FROM entity_types WHERE name = ?', (name,)).fetchone()
+    if row:
+        return row[0]
+    if kind not in ('text', 'enum', 'number'):
+        kind = 'text'
+    with atomic(conn):
+        cursor = conn.execute('INSERT INTO entity_types (name, kind, description) VALUES (?, ?, ?)',
+                              (name, kind, description or f'Utworzony automatycznie (LLM) {utcnow()}'))
+    LOG.info('LLM created entity type %r (%s)', name, kind)
+    return cursor.lastrowid
+
+
 # --- Export -----------------------------------------------------------------------------
 
 def export(conn: sqlite3.Connection) -> tuple[dict, list[dict]]:
@@ -512,12 +612,13 @@ def export(conn: sqlite3.Connection) -> tuple[dict, list[dict]]:
                              'entities': [{k: e[k] for k in ('type', 'value', 'original_fragment')}
                                           for e in entities]})
         dataset.append({'audio_path': row['audio_path'], 'recorded_at': row['recorded_at'],
-                        'duration_seconds': row['duration_seconds'], 'stt_model': row['stt_model'],
-                        'language': row['language'], 'original_transcript': row['original_transcript'],
-                        'local_transcript': local.get('text'), 'cloud_transcript': cloud.get('text'),
-                        'corrected_transcript': row['corrected_transcript'],
-                        'corrected_source': row['corrected_source'], 'intent': row['intent'],
-                        'parent_intent': row['parent'], 'entities': entities})
+                         'duration_seconds': row['duration_seconds'], 'stt_model': row['stt_model'],
+                         'language': row['language'], 'original_transcript': row['original_transcript'],
+                         'local_transcript': local.get('text'), 'cloud_transcript': cloud.get('text'),
+                         'corrected_transcript': row['corrected_transcript'],
+                         'corrected_source': row['corrected_source'], 'intent': row['intent'],
+                         'parent_intent': row['parent'], 'entities': entities,
+                         'annotation': annotation_of(row) or None})
     lexicon = {
         'version': 1,
         'generated_at': utcnow(),

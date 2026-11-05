@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Nagrania</h1>
+{% if request.query_params.get('annotate') %}<div class="notice ok">Oznaczanie LLM uruchomione w tle. Odśwież listę, aby zobaczyć postęp.</div>{% endif %}
+<form method="post" action="/annotate" style="margin-bottom:12px">
+  <button type="submit">Oznacz nieoznaczone nagrania przez LLM</button>
+  <span class="muted">do 500 nagrań; automatyczne oznaczanie włączysz w Ustawieniach.</span>
+</form>
+<p id="annotation-progress" class="muted" aria-live="polite"></p>
 <div class="row" style="margin-bottom:12px">
   <div>
     {% for s, label in [('new', 'nowe'), ('labeled', 'oznaczone'), ('skipped', 'pominięte')] %}
@@ -25,7 +31,7 @@
     <td class="mono"><a href="/recordings/{{ r.id }}">{{ r.recorded_at[:16].replace('T', ' ') }}</a><br><span class="muted">{{ '%.1f' % (r.duration_seconds or 0) }} s{% if r.origin == 'browser' %} · mikrofon{% elif r.origin == 'upload' %} · plik{% endif %}</span></td>
     <td>{% if r.original_transcript %}{{ r.original_transcript }}{% elif r.stt_error %}<span class="muted">błąd STT</span>{% else %}<span class="muted">(pusto)</span>{% endif %}</td>
     <td>{% if r.corrected_transcript %}{{ r.corrected_transcript }}{% if r.status == 'new' and r.corrected_source == 'cloud' %} <span class="chip">GPT</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
-    <td>{% if r.intent %}<span class="chip">{{ r.intent }}</span>{% elif r.predicted_intent %}<span class="muted">{{ r.predicted_intent }}?</span>{% endif %}</td>
+    <td>{% if r.intent %}<span class="chip">{{ r.intent }}</span>{% if r.annotation and '"source": "llm"' in r.annotation %} <span class="chip">LLM</span>{% endif %}{% elif r.predicted_intent %}<span class="muted">{{ r.predicted_intent }}?</span>{% endif %}</td>
     <td class="hide-sm status-{{ r.status }}">{{ r.status }}</td>
   </tr>
   {% else %}
@@ -38,4 +44,18 @@
   {% if page > 1 %}<a href="{{ link(page=page - 1) }}">← nowsze</a>{% endif %}
   {% if has_next %}<a href="{{ link(page=page + 1) }}" style="float:right">starsze →</a>{% endif %}
 </p>
+<script>
+(() => {
+  async function progress() {
+    try {
+      const response = await fetch('/annotate/status');
+      const state = await response.json();
+      document.getElementById('annotation-progress').textContent =
+        `LLM: ${state.running ? 'oznaczanie trwa · ' : ''}${state.labeled} oznaczonych · ${state.pending} oczekujących · ${state.failed} błędów`;
+    } catch (_) { /* The list remains usable without live progress. */ }
+  }
+  progress();
+  setInterval(progress, 5000);
+})();
+</script>
 {% endblock %}

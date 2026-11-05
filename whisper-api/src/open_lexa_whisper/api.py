@@ -44,6 +44,12 @@ class Transcriber(Protocol):
 
     def close(self) -> None: ...
 
+    # Optional multi-model support (HailoWhisperTranscriber implements both).
+    @property
+    def models(self) -> tuple[str, ...]: ...
+
+    def select_model(self, model: str) -> None: ...
+
 
 class APIRequestError(ValueError):
     """A client request that cannot be sent to the transcription backend."""
@@ -73,6 +79,7 @@ class APIState:
     transcriptions: int = 0
     failures: int = 0
     last_error: str | None = None
+    models: tuple[str, ...] = ()
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _ready_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -89,10 +96,12 @@ class APIState:
                 self.last_error = str(error)
             self._ready_event.clear()
 
-    def record_success(self) -> None:
+    def record_success(self, model: str | None = None) -> None:
         with self._lock:
             self.transcriptions += 1
             self.last_error = None
+            if model:
+                self.model = model
 
     def record_failure(self, error: Exception | str) -> None:
         with self._lock:
@@ -112,6 +121,7 @@ class APIState:
                 'status': 'ok' if self.ready else 'starting',
                 'backend': self.backend,
                 'model': self.model,
+                'models': list(self.models),
                 'ready': self.ready,
                 'uptime_seconds': round(time.time() - self.started, 1),
                 'transcriptions': self.transcriptions,
@@ -124,15 +134,18 @@ class APIState:
 class _Job:
     pcm: bytes
     language: str
+    model: str | None = None  # None keeps the transcriber's current selection
     done: threading.Event = field(default_factory=threading.Event)
     text: str | None = None
     error: Exception | None = None
+    used_model: str | None = None
 
 
 class WhisperAPI:
     """Own one transcriber in one worker thread and expose synchronous jobs."""
 
-    def __init__(self, transcriber: Transcriber, *, model: str = 'whisper-1',
+    def __init__(self, transcriber: Transcriber, *, model: str = 'whisper-base',
+                 models: tuple[str, ...] | None = None,
                  default_language: str = 'pl', api_key: str | None = None,
                  queue_size: int = 4, request_timeout: float = 45.0):
         if queue_size < 1:
@@ -140,16 +153,44 @@ class WhisperAPI:
         if request_timeout <= 0:
             raise ValueError('request_timeout must be positive')
         self.transcriber = transcriber
-        self.model = model
+        available = tuple(models or getattr(transcriber, 'models', ()) or ())
+        self.strict_models = bool(available)
+        self.models = available or (model,)
+        # 'whisper-1' is the generic OpenAI id older configurations still send;
+        # it maps to whatever model this API was started with.
+        self.model = model if model in self.models else self.models[0]
         self.default_language = default_language
         self.api_key = api_key or None
         self.request_timeout = request_timeout
-        self.state = APIState(transcriber.name, model)
+        self.state = APIState(transcriber.name, self.model, models=self.models)
         self._jobs: queue.Queue[_Job | None] = queue.Queue(maxsize=queue_size)
         self._thread = threading.Thread(target=self._run, name='whisper-inference', daemon=True)
         self._close_lock = threading.Lock()
         self._started = False
         self._closed = False
+
+    def resolve_model(self, requested: str | None) -> str | None:
+        """Map a request's ``model`` field to a known model id.
+
+        ``None`` keeps the transcriber's current selection. Raises
+        :class:`APIRequestError` (404, like OpenAI) for unknown models.
+        """
+        name = (requested or '').strip().lower()
+        if not name:
+            return self.model
+        if name in self.models:
+            return name
+        aliases = {'whisper-1': self.model, 'base': 'whisper-base', 'small': 'whisper-small',
+                   'whisper': self.model}
+        resolved = aliases.get(name)
+        if resolved in self.models:
+            return resolved
+        if not self.strict_models:
+            # Legacy single-model transcribers expose no model inventory.
+            return self.model
+        raise APIRequestError(
+            f"model '{requested}' not found; available: {', '.join(self.models)}",
+            status=404, param='model')
 
     def start(self) -> None:
         with self._close_lock:
@@ -178,8 +219,13 @@ class WhisperAPI:
                     if job is None:
                         return
                     try:
+                        if job.model is not None and hasattr(self.transcriber, 'select_model'):
+                            # Runs on the inference thread: HailoRT device work
+                            # must stay on the thread that created the handles.
+                            self.transcriber.select_model(job.model)
                         job.text = self.transcriber.transcribe(job.pcm, job.language)
-                        self.state.record_success()
+                        job.used_model = getattr(self.transcriber, 'model', None)
+                        self.state.record_success(job.used_model)
                     except Exception as exc:
                         job.error = exc
                         self.state.record_failure(exc)
@@ -202,11 +248,12 @@ class WhisperAPI:
         scheme, _, supplied = (header or '').partition(' ')
         return scheme.lower() == 'bearer' and hmac.compare_digest(supplied, self.api_key)
 
-    def transcribe(self, pcm: bytes, language: str | None = None) -> str:
+    def transcribe(self, pcm: bytes, language: str | None = None, model: str | None = None) -> str:
         if not self.state.is_ready():
             detail = self.state.snapshot()['last_error'] or 'model is still starting'
             raise APIUnavailableError(str(detail))
-        job = _Job(pcm, (language or self.default_language or 'auto').strip() or 'auto')
+        job = _Job(pcm, (language or self.default_language or 'auto').strip() or 'auto',
+                   model=self.resolve_model(model))
         try:
             self._jobs.put_nowait(job)
         except queue.Full as exc:
@@ -359,8 +406,9 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
             return
         if path == '/v1/models':
             self._json(200, {'object': 'list', 'data': [
-                {'id': self.api.model, 'object': 'model', 'owned_by': 'open-lexa'},
-            ]})
+                {'id': name, 'object': 'model', 'owned_by': 'open-lexa'}
+                for name in self.api.models],
+                'loaded_model': self.api.state.snapshot()['model']})
             return
         self._error(404, 'not found')
 
@@ -374,7 +422,8 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
         try:
             fields, wav = _read_multipart(self, DEFAULT_MAX_UPLOAD_BYTES)
             pcm = _pcm_from_wav(wav)
-            text = self.api.transcribe(pcm, _request_language(fields, self.api.default_language))
+            text = self.api.transcribe(pcm, _request_language(fields, self.api.default_language),
+                                       model=_form_value(fields, 'model'))
         except APIRequestError as exc:
             self._error(exc.status, str(exc), param=exc.param)
             return
@@ -417,7 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--env-file', default='.env')
     parser.add_argument('--bind', help='HTTP bind address (default: WHISPER_API_BIND or 0.0.0.0)')
     parser.add_argument('--port', type=int, help='HTTP port (default: WHISPER_API_PORT or 8080)')
-    parser.add_argument('--model', help='Advertised model name (default: WHISPER_API_MODEL or whisper-1)')
+    parser.add_argument('--model', help='Default model (default: WHISPER_API_MODEL or whisper-base)')
     parser.add_argument('--language', help='Fallback language (default: WHISPER_API_LANGUAGE or pl)')
     return parser
 
@@ -463,9 +512,16 @@ def main() -> None:
     except ConfigError as exc:
         parser.error(str(exc))
 
+    models = tuple(getattr(transcriber, 'models', ()) or ())
+    advertised = (args.model or os.environ.get('WHISPER_API_MODEL', '')).strip()
+    if advertised and advertised not in models and advertised != 'whisper-1':
+        parser.error(f'default model {advertised!r} is not bundled ({", ".join(models)})')
+    default_model = advertised or getattr(transcriber, 'default_model', '') or \
+        (models[0] if models else 'whisper-base')
     api = WhisperAPI(
         transcriber,
-        model=args.model or os.environ.get('WHISPER_API_MODEL', 'whisper-1'),
+        model=default_model,
+        models=models or None,
         default_language=args.language or os.environ.get('WHISPER_API_LANGUAGE', 'pl'),
         api_key=os.environ.get('WHISPER_API_KEY') or None,
         queue_size=queue_size,

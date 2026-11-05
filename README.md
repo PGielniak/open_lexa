@@ -173,7 +173,7 @@ Następnie STT:
 
 Po zakończeniu wypowiedzi program wypisuje rozpoznany tekst. `--save-dir recordings` można stosować również z STT; WAV jest zapisywany przed wywołaniem backendu. Bez tej opcji audio pozostaje w pamięci. Logi trafiają na stderr, transkrypcja na stdout.
 
-Każda transkrypcja trafia do funkcji decyzyjnej `decide()` w [`udp-receiver/src/open_lexa/commands.py`](udp-receiver/src/open_lexa/commands.py): tekst jest normalizowany (małe litery, bez interpunkcji) i porównywany z regułami `RULES`. Dopasowana komenda jest na razie tylko **logowana** (`Command: lights_on ...`); bez dopasowania (także przy pustej transkrypcji) odpowiedzią jest `sorry ale nie rozumiem`. Nową komendę dodaje się jako kolejną parę `(nazwa, regex)` w `RULES`.
+Transkrypcja trafia do NLU opartego o eksportowany słownik (`_lexicon/lexicon.json`); przy jego braku funkcja `decide()` z [`commands.py`](udp-receiver/src/open_lexa/commands.py) zachowuje reguły regex jako awaryjne. Odbiornik przekazuje rozpoznaną intencję i encje do włączonych handlerów. Sonos/Spotify jest pierwszym pluginem (odtwarzanie, pauza, głośność); pozostałe intencje bez handlera są tylko logowane i archiwizowane. Ustawienia STT, oznaczanie LLM, model Base/Small i konfiguracja Sonos są dostępne w panelu admina. Architektura oraz instrukcje uruchomienia: [`docs/HANDLERS.md`](docs/HANDLERS.md).
 
 #### Archiwum SMB (do retrainingu)
 

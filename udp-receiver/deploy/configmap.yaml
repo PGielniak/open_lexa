@@ -16,7 +16,7 @@ data:
   # Use STT_BACKEND=http (local only) if OPENAI_API_KEY is not configured.
   STT_BACKEND: "dual"
   STT_HTTP_URL: "http://open-lexa-whisper:8080/v1"
-  STT_HTTP_MODEL: "whisper-1"
+  STT_HTTP_MODEL: "whisper-base"
   # STT_HTTP_API_KEY belongs in open-lexa-secrets, never here.
   STT_LANGUAGE: "pl"
   # Cloud endpoint for dual/openai (OPENAI_API_KEY in open-lexa-secrets).

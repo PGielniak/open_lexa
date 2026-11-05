@@ -1,9 +1,14 @@
-# Plan: etykietowanie nagrań, intencje z encjami i korekta transkrypcji
+# Etykietowanie nagrań — pierwotny plan projektu
 
-Cel: transkrypcje z Hailo (obecnie Whisper-Small) są słabe. Odbiornik wysyła
+**Status:** poniższy dokument zachowuje historyczne założenia i szkice etapów.
+Aktualny opis działania (Whisper Base/Small, NLU, LLM i handlery Sonos/Spotify)
+znajduje się w [HANDLERS.md](HANDLERS.md). Nie traktuj wzmianki o Small/Medium
+ani ręcznym etykietowaniu jako bieżących ograniczeń systemu.
+
+Pierwotny cel: transkrypcje z Hailo Whisper-Small wymagały porównania. Odbiornik wysyła
 więc **każde** nagranie równolegle do lokalnego Whispera i do chmury
 (`gpt-transcribe`). GPT automatycznie wypełnia „poprawną” transkrypcję, a
-człowiek dodaje już tylko **intencję i encje** z zamkniętego zbioru poleceń.
+człowiek lub osobny LLM dodaje **intencję i encje** (LLM może rozszerzać słownik).
 System uczy się na nagraniach poprawionych ręcznie w admin UI.
 
 ```

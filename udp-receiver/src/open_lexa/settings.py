@@ -27,7 +27,10 @@ MODES = ('dual', 'local', 'cloud')
 DEFAULTS = {
     'mode': 'dual',
     'local_url': 'http://open-lexa-whisper:8080/v1',
-    'local_model': 'whisper-1',
+    # Base is the default for comparison on Polish recordings; the portal can
+    # switch to 'whisper-small' (or 'whisper-1' = the
+    # Whisper API's own default). See whisper-api/deploy/configmap.yaml.
+    'local_model': 'whisper-base',
     'cloud_url': 'https://api.openai.com/v1',
     'cloud_model': 'gpt-transcribe',
     'cloud_api_key': '',

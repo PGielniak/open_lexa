@@ -1,7 +1,9 @@
 """Map a transcript to a voice command.
 
-Commands are not executed yet: a match is only logged. Add a rule to
-:data:`RULES` to teach the receiver a new phrase.
+``decide()`` keeps the original regex rules and acts as the fallback when no
+lexicon is available or nothing matches confidently; the lexicon-based NLU
+lives in :mod:`open_lexa.nlu`. A match is passed to the handler plugins in
+:mod:`open_lexa.handlers` for execution.
 """
 from __future__ import annotations
 
@@ -25,8 +27,23 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 @dataclass(frozen=True)
 class Decision:
+    """Recognition outcome for one transcript.
+
+    ``command``/``reply`` keep the original receiver contract (and the archive
+    sidecar keys); ``intent``/``entities``/``score``/``source`` carry the NLU
+    detail the handler plugins and the admin UI use.
+    """
+
     command: str | None
     reply: str
+    intent: str | None = None
+    entities: tuple[tuple[str, str], ...] = ()
+    score: float | None = None
+    source: str | None = None
+
+    @property
+    def entities_dict(self) -> dict[str, str]:
+        return dict(self.entities)
 
 
 def normalize(text: str) -> str:
@@ -35,11 +52,11 @@ def normalize(text: str) -> str:
 
 
 def decide(text: str | None) -> Decision:
-    """Choose the command for a transcript and "execute" it (log only for now)."""
+    """Choose the command for a transcript using the built-in regex rules."""
     normalized = normalize(text or '')
     for command, pattern in RULES:
         if pattern.search(normalized):
             LOG.info('Command: %s (%r)', command, text)
-            return Decision(command, command)
+            return Decision(command, command, intent=command, score=100.0, source='rules')
     LOG.info('No command for %r: %s', text, DEFAULT_REPLY)
     return Decision(None, DEFAULT_REPLY)

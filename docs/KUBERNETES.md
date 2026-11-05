@@ -129,10 +129,11 @@ ESP32 -- UDP --> open-lexa (receiver) -- HTTP --> open-lexa-whisper (ClusterIP) 
   HailoRT handle is thread-affine.
 
 The API image (`whisper-api/build/Dockerfile`) bakes in checksum-verified
-Hailo Whisper-Small; it does not download the model at pod startup. The model
-URL, SHA-256 and filename are build arguments, so a future compatible
-HailoRT/model experiment can use a new immutable image tag without changing
-the receiver.
+Hailo Whisper-Base and Whisper-Small HEFs. It does not download them at pod
+startup; the API switches the loaded model on its owner thread between
+requests. Build arguments pin URLs and SHA-256 values. The admin's local STT
+model selector chooses `whisper-base` or `whisper-small`; the legacy
+`whisper-1` model name aliases Base.
 
 Check the deployed path end to end with every valid recording in
 `recordings/`:
@@ -155,7 +156,7 @@ fallback when the cloud call fails.
 # Dual (default; OPENAI_API_KEY in Secret/open-lexa-secrets)
 STT_BACKEND: "dual"
 STT_HTTP_URL: "http://open-lexa-whisper:8080/v1"
-STT_HTTP_MODEL: "whisper-1"
+STT_HTTP_MODEL: "whisper-base"
 OPENAI_STT_MODEL: "gpt-transcribe"
 # OPENAI_BASE_URL: "https://api.openai.com/v1"
 ```
@@ -166,7 +167,7 @@ Single-endpoint modes remain available:
 # Local in-cluster Hailo API only
 STT_BACKEND: "http"
 STT_HTTP_URL: "http://open-lexa-whisper:8080/v1"
-STT_HTTP_MODEL: "whisper-1"
+STT_HTTP_MODEL: "whisper-base"
 
 # A cloud OpenAI-compatible endpoint only
 STT_BACKEND: "http"
@@ -233,9 +234,10 @@ unset PW
 
 ## Labeling admin UI
 
-`admin-dashboard/deploy/` runs `open-lexa-admin` (plan: [`LABELING.md`](LABELING.md)):
+`admin-dashboard/deploy/` runs `open-lexa-admin` (see [`LABELING.md`](LABELING.md),
+[`HANDLERS.md`](HANDLERS.md)):
 SQLite on a `longhorn-retain` PVC, recordings read from the `open-lexa` SMB share,
-`_lexicon/lexicon.json` + `_dataset/labels.jsonl` exported back to it. Reachable only
+`_lexicon/lexicon.json`, `_config/handlers.json` and `_dataset/labels.jsonl` exported back to it. Reachable only
 through the Tailscale Ingress (`https://open-lexa-admin.<tailnet>.ts.net`) with basic auth.
 
 ```sh
