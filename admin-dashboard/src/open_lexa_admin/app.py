@@ -27,6 +27,7 @@ from open_lexa.audio import wav_bytes
 from open_lexa.commands import decide
 from open_lexa.handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH
 from open_lexa.handlers import discover as discover_handlers
+from open_lexa.llm import SETTINGS_PATH as LLM_SETTINGS_PATH
 from open_lexa.protocol import MAX_BYTES, RATE
 from open_lexa.store import Store, create_store, missing
 from open_lexa.stt import (ConfigError, Transcriber, format_errors, preferred_result,
@@ -116,6 +117,7 @@ class Worker:
                 lexicon, dataset = db.export(conn)
                 settings = db.get_setting(conn, 'stt')
                 handlers = db.get_setting(conn, 'handlers')
+                llm_settings = db.get_setting(conn, 'llm')
             finally:
                 conn.close()
             if settings is not None:
@@ -129,6 +131,11 @@ class Worker:
             self.store.write_atomic(LEXICON_PATH, json.dumps(lexicon, ensure_ascii=False, indent=1).encode())
             self.store.write_atomic(DATASET_PATH, ''.join(
                 json.dumps(row, ensure_ascii=False) + '\n' for row in dataset).encode())
+            if llm_settings is not None:
+                # The receiver's LLM NLU polls this file; see open_lexa.llm.
+                # Published last: a broken LLM section must not block the lexicon.
+                self.store.write_atomic(LLM_SETTINGS_PATH, json.dumps(
+                    llm.publish_payload(llm_settings), ensure_ascii=False, indent=1).encode())
             self.last_export = time.time()
             LOG.info('Exported lexicon (%d examples) and %d dataset rows', len(lexicon['examples']), len(dataset))
 
@@ -594,10 +601,15 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         if settings['auto_label'] and not settings['api_key']:
             return RedirectResponse('/settings?' + urlencode({'error': 'LLM: podaj klucz API dla automatycznego oznaczania'}),
                                     http.HTTP_303_SEE_OTHER)
+        if settings['receiver_mode'] != 'off' and not settings['api_key']:
+            return RedirectResponse('/settings?' + urlencode({'error': 'LLM: tryb odbiornika wymaga klucza API'}),
+                                    http.HTTP_303_SEE_OTHER)
         db.set_setting(conn, 'llm', settings)
+        worker.mark_changed()  # publish _config/llm.json for the receiver
         worker.annotate_wake.set()
-        LOG.info('LLM settings saved (%s / %s, auto=%s)', settings['url'], settings['model'],
-                 'on' if settings['auto_label'] else 'off')
+        LOG.info('LLM settings saved (%s / %s, auto=%s, receiver=%s)', settings['url'],
+                 settings['model'], 'on' if settings['auto_label'] else 'off',
+                 settings['receiver_mode'])
         return RedirectResponse('/settings?saved=llm', http.HTTP_303_SEE_OTHER)
 
     @app.post('/settings/llm-test', dependencies=protected)

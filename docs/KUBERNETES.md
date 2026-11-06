@@ -61,6 +61,12 @@ kubectl -n open-lexa get secret open-lexa-secrets \
   -o jsonpath='{.data.OPEN_LEXA_TOKEN}' | base64 -d; echo
 ```
 
+For the receiver's LLM intent recognition, the usual setup is to enter the key
+once in the admin UI (Ustawienia → LLM → tryb odbiornika); it is published to
+`_config/llm.json`. Only when the receiver runs without an SMB archive add the
+key here: `--from-literal=LLM_API_KEY="$LLM_KEY"` (details in
+`docs/HANDLERS.md`).
+
 Do not commit `secret.example.yaml` values or a real Secret manifest.
 
 ## Deploy

@@ -6,7 +6,9 @@ follows docs/LABELING.md: Polish phonetic folding + rapidfuzz against examples
 and literal phrases, regex matching of phrase templates with ``{slot}``
 placeholders, and dictionary/number entity extraction. When the lexicon is
 missing or nothing matches confidently, the regex rules in
-:mod:`open_lexa.commands` remain the fallback.
+:mod:`open_lexa.commands` remain the fallback. An optional LLM cascade
+(:mod:`open_lexa.llm`) can decide immediately after transcription or only
+when both the lexicon and the rules recognise nothing.
 """
 from __future__ import annotations
 
@@ -77,6 +79,7 @@ class Lexicon:
     examples: tuple[_Example, ...] = ()
     literals: tuple[tuple[str, str, str], ...] = ()                 # (phonetic, compact, intent)
     templates: tuple[_Template, ...] = ()
+    phrases: dict[str, tuple[str, ...]] = field(default_factory=dict)  # intent -> original phrases
     entities: dict[str, dict] = field(default_factory=dict)         # type -> {'kind','values'}
     version: int = 0
 
@@ -122,6 +125,7 @@ def parse_lexicon(data: dict) -> Lexicon:
     info: dict[str, dict] = {}
     literals: list[tuple[str, str, str]] = []
     templates: list[_Template] = []
+    phrases: dict[str, list[str]] = {}
     for intent in intents:
         if not isinstance(intent, dict) or not intent.get('name'):
             raise ValueError('every intent needs a name')
@@ -133,6 +137,7 @@ def parse_lexicon(data: dict) -> Lexicon:
         }
         for phrase in intent.get('phrases') or []:
             phrase = str(phrase)
+            phrases.setdefault(name, []).append(phrase)
             compiled = _template_regex(phrase)
             if compiled is not None:
                 prefix = phonetic(phrase.split('{', 1)[0])
@@ -158,8 +163,8 @@ def parse_lexicon(data: dict) -> Lexicon:
             values[str(value)] = [str(s) for s in synonyms or []]
         entities[str(name)] = {'kind': spec.get('kind', 'text'), 'values': values}
     return Lexicon(intents=info, examples=tuple(examples), literals=tuple(literals),
-                   templates=tuple(templates), entities=entities,
-                   version=int(data.get('version') or 1))
+                   templates=tuple(templates), phrases={k: tuple(v) for k, v in phrases.items()},
+                   entities=entities, version=int(data.get('version') or 1))
 
 
 def _extract_number(text: str) -> str | None:
@@ -284,10 +289,12 @@ def match(text: str | None, lexicon: Lexicon) -> Decision | None:
 
 
 class NLU:
-    """Lexicon matcher with the regex-rule fallback."""
+    """Lexicon matcher with the regex-rule fallback and an optional LLM cascade."""
 
-    def __init__(self, lexicon: Lexicon | None = None):
+    def __init__(self, lexicon: Lexicon | None = None, llm=None, mode: str = 'off'):
         self.lexicon = lexicon or Lexicon()
+        self.llm = llm
+        self.mode = mode if llm is not None else 'off'
 
     def update(self, data: dict | None) -> bool:
         """Swap in a new lexicon (None clears it). True when it changed."""
@@ -305,9 +312,21 @@ class NLU:
         return changed
 
     def decide(self, text: str | None) -> Decision:
+        """Lexicon first, then regex rules, then the LLM cascade if configured."""
         decision = match(text, self.lexicon)
         if decision is not None:
             LOG.info('NLU: %s (%s, score %.0f) for %r', decision.intent, decision.source,
                      decision.score or 0, text)
-            return decision
-        return rules_decide(text) if (text or '').strip() else Decision(None, DEFAULT_REPLY)
+            base = decision
+        else:
+            base = rules_decide(text) if (text or '').strip() else Decision(None, DEFAULT_REPLY)
+        if self.llm is None or self.mode == 'off' or not (text or '').strip():
+            return base
+        if self.mode == 'fallback' and base.intent is not None:
+            return base
+        llm_decision = self.llm.recognize(text, self.lexicon)
+        if llm_decision is not None:
+            LOG.info('LLM NLU: %s (score %s) for %r', llm_decision.intent,
+                     llm_decision.score, text)
+            return llm_decision
+        return base

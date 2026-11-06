@@ -58,7 +58,7 @@
 </form>
 
 <form method="post" action="/settings/llm" class="panel" style="margin-top:16px" id="llm-form">
-  <h2 style="margin-top:0">LLM — automatyczne oznaczanie nagrań</h2>
+  <h2 style="margin-top:0">LLM — oznaczanie nagrań i rozpoznawanie w odbiorniku</h2>
   <p class="muted" style="margin-top:0">Osobny klucz API do modelu językowego (OpenAI-compatible). LLM przypisuje intencję i encje do nowych nagrań — tworzy brakujące pozycje słownika. Etykiety pozostają edytowalne; każde oznaczenie dostaje adnotację „LLM”.</p>
   <div class="row">
     <div style="flex-basis:320px"><label for="llm_url">Bazowy URL (Chat Completions)</label>
@@ -78,6 +78,14 @@
       <input type="text" id="llm_timeout" name="timeout" value="{{ llm.timeout }}"></div>
     <div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="auto_label" value="1"{% if llm.auto_label %} checked{% endif %}> oznaczaj nowe nagrania automatycznie</label></div>
   </div>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:0 0 auto">
+      <label class="inline"><input type="radio" name="receiver_mode" value="off"{% if llm.receiver_mode == 'off' %} checked{% endif %}> w odbiorniku wyłączony</label>
+      <label class="inline"><input type="radio" name="receiver_mode" value="fallback"{% if llm.receiver_mode == 'fallback' %} checked{% endif %}> fallback — odbiornik pyta LLM, gdy słownik nic nie rozpozna</label>
+      <label class="inline"><input type="radio" name="receiver_mode" value="always"{% if llm.receiver_mode == 'always' %} checked{% endif %}> always — LLM rozstrzyga każde nagranie po transkrypcji</label>
+    </div>
+  </div>
+  <p class="muted" style="font-size:13px; margin-bottom:0">Ustawienia LLM trafiają do <span class="mono">_config/llm.json</span> na udziale SMB (klucz API tylko przy włączonym trybie odbiornika), skąd czyta je odbiornik — ten sam klucz, bez drugiego wpisania w <span class="mono">.env</span>. <span class="mono">--llm-mode</span> odbiornika ma pierwszeństwo nad plikiem.</p>
   <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
     <button class="primary">Zapisz</button>
     <button type="button" id="llm-test">Test połączenia</button>

@@ -22,6 +22,8 @@ from .archive import Archive, create_archive
 from .audio import wav_bytes
 from .commands import Decision, decide
 from .handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH, Dispatcher, validate_config
+from .llm import MODES as LLM_MODES, LLMConfigError, create_llm, create_llm_from_file
+from .llm import SETTINGS_PATH as LLM_SETTINGS_PATH
 from .nlu import LEXICON_PATH, NLU
 from .protocol import CHUNK, HEADER, RATE, Receiver, Recording, parse_token
 from .settings import SettingsWatcher
@@ -45,6 +47,7 @@ class HealthState:
     last_recording: float | None = None
     last_error: str | None = None
     handlers: dict = field(default_factory=dict)
+    llm: dict = field(default_factory=dict)
 
     def snapshot(self) -> dict:
         return {
@@ -60,6 +63,7 @@ class HealthState:
             'last_recording': self.last_recording,
             'last_error': self.last_error,
             'handlers': self.handlers,
+            'llm': self.llm,
         }
 
 
@@ -168,11 +172,13 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
            handle: Callable[[str | None], Decision] = decide, archive: Archive | None = None,
            settings: SettingsWatcher | None = None, nlu: NLU | None = None,
            lexicon: JsonWatcher | None = None, dispatcher: Dispatcher | None = None,
-           handlers_config: JsonWatcher | None = None) -> None:
+           handlers_config: JsonWatcher | None = None,
+           llm_config: JsonWatcher | None = None) -> None:
     writer = ArchiveWriter(archive, state) if archive is not None else None
     applied = 0  # settings.version the current transcriber was built from; 0 = environment
     applied_lexicon = 0
     applied_handlers = 0
+    applied_llm = 0  # llm_config.version the current LLM client was built from; 0 = environment
     override: str | None = None
     if transcriber is not None:
         try:
@@ -206,6 +212,26 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 applied_handlers = handlers_config.version
                 dispatcher.apply_config(handlers_config.data)
                 state.handlers = dispatcher.summary()
+            if nlu is not None and llm_config is not None and llm_config.version != applied_llm:
+                applied_llm = llm_config.version
+                # Same contract as the STT settings file: invalid keeps the
+                # running client, absent falls back to the environment.
+                try:
+                    replacement = create_llm_from_file(llm_config.data)
+                except Exception as exc:
+                    LOG.warning('New LLM settings rejected (%s); keeping %s', exc,
+                                nlu.llm.model if nlu.llm is not None else 'the current client')
+                else:
+                    if nlu.llm is not None and nlu.llm is not replacement:
+                        try:
+                            nlu.llm.close()
+                        except Exception:
+                            LOG.exception('LLM client shutdown failed')
+                    nlu.llm = replacement
+                    nlu.mode = replacement.mode if replacement is not None else 'off'
+                    state.llm = replacement.stats if replacement is not None else {}
+                    LOG.info('LLM NLU: %s', f'{replacement.mode} / {replacement.model}'
+                             if replacement is not None else 'disabled')
             lang = override or language
             if transcriber is None:
                 print(f'[dry-run] {recording.peer[0]}: {len(recording.pcm) / (RATE * 2):.2f} s, '
@@ -267,6 +293,11 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
             transcriber.close()
         except Exception:
             LOG.exception('STT backend shutdown failed')
+    if nlu is not None and getattr(nlu, 'llm', None) is not None:
+        try:
+            nlu.llm.close()
+        except Exception:
+            LOG.exception('LLM client shutdown failed')
     if writer is not None:
         writer.close()
     if dispatcher is not None:
@@ -295,6 +326,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--lexicon-seconds', type=float,
                         help='Poll the NLU lexicon on SMB every N s, 0 disables '
                              '(default: OPEN_LEXA_LEXICON_SECONDS or 60)')
+    parser.add_argument('--llm-mode', choices=LLM_MODES,
+                        help='LLM intent/entity recognition after transcription (default: '
+                             'LLM_INTENT_MODE; always when LLM_API_KEY and LLM_MODEL are set)')
     parser.add_argument('--dry-run', action='store_true', help='Receive audio without initialising an STT backend')
     return parser
 
@@ -361,9 +395,18 @@ def main():
             parser.error('OPEN_LEXA_LEXICON_SECONDS must be a number')
     # NLU lexicon and handler plugins ride the same archive as the recordings;
     # without it the receiver keeps the built-in regex rules and logs commands.
+    # The optional LLM cascade needs no archive: without a lexicon it offers
+    # the regex-rule command names to the model instead.
+    llm_client = None
+    if not args.dry_run:
+        try:
+            llm_client = create_llm(mode=args.llm_mode)
+        except LLMConfigError as exc:
+            parser.error(str(exc))
     nlu = lexicon = dispatcher = handlers_config = None
+    if archive is not None or llm_client is not None:
+        nlu = NLU(llm=llm_client, mode=llm_client.mode if llm_client is not None else 'off')
     if archive is not None:
-        nlu = NLU()
         dispatcher = Dispatcher()
         if lexicon_seconds > 0:
             lexicon = JsonWatcher(create_store(), LEXICON_PATH, interval=lexicon_seconds)
@@ -373,9 +416,18 @@ def main():
     if archive is not None and settings_seconds > 0 and not args.backend and not args.model:
         settings = SettingsWatcher(create_store(), lambda: create_transcriber(backend),
                                    interval=settings_seconds)
+    # The admin publishes its LLM settings (URL, model, key) to the archive;
+    # the file overrides the LLM_* environment, --llm-mode pins the env only.
+    llm_config = None
+    if archive is not None and settings_seconds > 0 and not args.llm_mode:
+        llm_config = JsonWatcher(create_store(), LLM_SETTINGS_PATH, interval=settings_seconds)
     state = HealthState(transcriber.name if transcriber is not None else 'dry-run',
                         ready=args.dry_run,
                         handlers=dispatcher.summary() if dispatcher is not None else {})
+    if llm_client is not None:
+        state.llm = llm_client.stats  # shared dict: /healthz sees live counters
+        LOG.info('LLM NLU enabled: mode=%s model=%s url=%s', llm_client.mode,
+                 llm_client.model, llm_client.settings['url'])
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -409,7 +461,8 @@ def main():
             kwargs={'archive': archive, 'settings': settings,
                     'handle': nlu.decide if nlu is not None else decide,
                     'nlu': nlu, 'lexicon': lexicon,
-                    'dispatcher': dispatcher, 'handlers_config': handlers_config},
+                    'dispatcher': dispatcher, 'handlers_config': handlers_config,
+                    'llm_config': llm_config},
             daemon=True, name='stt')
         thread.start()
         if settings is not None:
@@ -418,6 +471,8 @@ def main():
             lexicon.start()
         if handlers_config is not None:
             handlers_config.start()
+        if llm_config is not None:
+            llm_config.start()
         if health_port:
             httpd = start_health_server(health_port, state)
         LOG.info('Listening on %s:%d/UDP; backend=%s; language=%s; archive=%r',
@@ -455,6 +510,8 @@ def main():
                 lexicon.stop()
             if handlers_config is not None:
                 handlers_config.stop()
+            if llm_config is not None:
+                llm_config.stop()
             if httpd is not None:
                 httpd.shutdown()
                 httpd.server_close()

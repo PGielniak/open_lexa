@@ -175,6 +175,24 @@ Po zakończeniu wypowiedzi program wypisuje rozpoznany tekst. `--save-dir record
 
 Transkrypcja trafia do NLU opartego o eksportowany słownik (`_lexicon/lexicon.json`); przy jego braku funkcja `decide()` z [`commands.py`](udp-receiver/src/open_lexa/commands.py) zachowuje reguły regex jako awaryjne. Odbiornik przekazuje rozpoznaną intencję i encje do włączonych handlerów. Sonos/Spotify jest pierwszym pluginem (odtwarzanie, pauza, głośność); pozostałe intencje bez handlera są tylko logowane i archiwizowane. Ustawienia STT, oznaczanie LLM, model Base/Small i konfiguracja Sonos są dostępne w panelu admina. Architektura oraz instrukcje uruchomienia: [`docs/HANDLERS.md`](docs/HANDLERS.md).
 
+**Rozpoznawanie intencji przez LLM (odbiornik).** Po każdej transkrypcji tekst może
+trafić bezpośrednio do LLM (dowolny endpoint Chat Completions zgodny z OpenAI).
+Wystarczy skonfigurować model w panelu admina (**Ustawienia → LLM**) i wybrać tryb
+odbiornika — URL, model, timeout i klucz API trafiają wtedy do `_config/llm.json`
+na udziale SMB (klucz tylko gdy tryb odbiornika jest włączony), więc nie trzeba go
+wpisywać drugi raz w `.env`. Alternatywnie, bez archiwum SMB: zmienne `LLM_MODEL`,
+`LLM_API_KEY` (Secret), `LLM_URL`, `LLM_TIMEOUT`. Tryb przez `LLM_INTENT_MODE` lub
+`--llm-mode`: `always` — model rozstrzyga intencję i encje dla każdego nagrania
+(domyślnie, gdy klucz i model są ustawione), `fallback` — LLM działa tylko, gdy
+słownik i reguły nic nie rozpoznały, `off` — wyłączone. Kolejność źródeł:
+`--llm-mode` (wyłącza odczyt pliku) > `_config/llm.json` > zmienne `LLM_*`. Model
+wybiera wyłącznie intencje i typy encji z opublikowanego słownika (bez słownika
+dostaje nazwy komend z reguł regex); nigdy nie tworzy nowych etykiet — to rola
+oznaczania w adminie. Błędna lub niedostępna odpowiedź LLM nie przerywa potoku:
+zostaje decyzja leksykalna/regułowa; niepoprawny plik zostawia działający klient
+(`WARNING` w logu). Rozpoznanie trafia do handlerów i do sidecara archiwum z
+`source: "llm"`, a liczniki wywołań widać w `/healthz`.
+
 #### Archiwum SMB (do retrainingu)
 
 Po ustawieniu `SMB_SERVER` i `SMB_SHARE` każde nagranie jest zapisywane na udziale SMB jako `\\SMB_SERVER\SMB_SHARE\SMB_PATH\RRRR-MM-DD\<ns>-<sesja>.wav` wraz z plikiem `.json` (tekst, język, backend, komenda, odpowiedź, czas trwania; przy błędzie STT `text: null` i `error`). W trybie `dual` sidecar zawiera dodatkowo `transcripts.local` i `transcripts.cloud` (tekst, model, błąd, czas odpowiedzi), `corrected_text` (tekst GPT) i `corrected_source`. JSON jest zapisywany po WAV, więc jego obecność oznacza kompletną parę. Klient SMB działa w Pythonie (`smbprotocol`), bez montowania CIFS, więc działa też w podzie non-root z read-only rootfs.
@@ -261,7 +279,7 @@ szczególnie przy cichych nagraniach z ESP32, bez zmiany głośnych sygnałów. 
 - `src/audio/` — resampling i granice nagrania, używane również w testach C++.
 - `src/model/` — osadzony model Alexa i manifest z SHA-256.
 - `firmware/build/` — `arduino.sh` (install/compile/upload), konfiguracja i odtwarzanie modelu.
-- `udp-receiver/src/open_lexa/` — odbiornik UDP, protokół, backendy STT (`stt.py`), archiwum i store SMB.
+- `udp-receiver/src/open_lexa/` — odbiornik UDP, protokół, backendy STT (`stt.py`), NLU słownikowe i LLM (`nlu.py`, `llm.py`), archiwum i store SMB.
 - `whisper-api/src/open_lexa_whisper/` — API OpenAI-compatible (`api.py`) i Whisper na HailoRT (`hailo.py`).
 - `admin-dashboard/src/open_lexa_admin/` — panel do oznaczania nagrań i ustawień STT.
 - `<komponent>/tests/` — testy; uruchamiane razem z roota.

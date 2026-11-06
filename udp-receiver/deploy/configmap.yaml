@@ -30,3 +30,14 @@ data:
   SMB_SHARE: "open-lexa"
   SMB_PATH: ""
   SMB_TIMEOUT: "10"
+  # Optional LLM intent/entity recognition after transcription. With SMB the
+  # admin publishes its Ustawienia → LLM settings (including the key, only
+  # when the receiver mode is on) to _config/llm.json and this file takes
+  # precedence; use LLM_* only without an archive. LLM_API_KEY belongs in
+  # open-lexa-secrets, never here. Modes: always (LLM decides every
+  # transcript, default when key+model are set), fallback (only when the
+  # lexicon/rules recognise nothing), off.
+  # LLM_INTENT_MODE: "fallback"
+  # LLM_MODEL: "gpt-4o-mini"
+  # LLM_URL: "https://api.openai.com/v1"
+  # LLM_TIMEOUT: "15"

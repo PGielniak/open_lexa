@@ -27,7 +27,11 @@ LLM_DEFAULTS = {
     'auto_label': '',        # checkbox: annotate new recordings in the background
     'batch_size': '5',
     'timeout': '60',
+    'receiver_mode': 'off',  # the receiver's LLM NLU after each transcription
 }
+
+# Mirrors open_lexa.llm.MODES; the published file uses the receiver's key names.
+RECEIVER_MODES = ('off', 'fallback', 'always')
 
 SYSTEM_PROMPT = (
     'Jesteś systemem NLU polskiego asystenta głosowego Open Lexa. Dostajesz transkrypcję '
@@ -70,6 +74,9 @@ def validate_llm(raw: dict) -> dict:
     if not settings['model']:
         raise LLMConfigError('model LLM jest wymagany')
     settings['auto_label'] = '1' if settings['auto_label'] in ('1', 'true', 'on', 'yes') else ''
+    settings['receiver_mode'] = settings['receiver_mode'] or 'off'  # e.g. forms predating the field
+    if settings['receiver_mode'] not in RECEIVER_MODES:
+        raise LLMConfigError(f'tryb odbiornika LLM musi być jednym z: {", ".join(RECEIVER_MODES)}')
     try:
         batch = max(1, min(50, int(settings['batch_size'] or 5)))
         timeout = max(5.0, min(600.0, float(settings['timeout'] or 60)))
@@ -82,6 +89,20 @@ def validate_llm(raw: dict) -> dict:
 
 def llm_enabled(settings: dict | None) -> bool:
     return bool(settings and settings.get('api_key') and settings.get('model'))
+
+
+def publish_payload(settings: dict) -> dict:
+    """``_config/llm.json`` for the receiver (see :mod:`open_lexa.llm`).
+
+    The API key is included only while the receiver mode is on, so the share
+    never stores a credential the receiver will not use.
+    """
+    settings = validate_llm(settings)
+    payload = {'mode': settings['receiver_mode'], 'url': settings['url'],
+               'model': settings['model'], 'timeout': settings['timeout']}
+    if settings['receiver_mode'] != 'off':
+        payload['api_key'] = settings['api_key']
+    return payload
 
 
 def dictionary_snapshot(conn, *, max_values: int = 60, max_examples: int = 40) -> dict:

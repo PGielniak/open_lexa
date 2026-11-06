@@ -89,3 +89,31 @@ def test_disabled_auto_annotation_is_noop(tmp_path):
     conn.close()
     worker = Worker(str(tmp_path / 'labels.sqlite3'), DirStore(tmp_path / 'archive'))
     assert worker.annotate_pending(auto=True) == (0, 0)
+
+
+def test_llm_settings_are_published_for_the_receiver(tmp_path):
+    from open_lexa.llm import SETTINGS_PATH as LLM_SETTINGS_PATH
+
+    store = DirStore(tmp_path / 'archive')
+    app = create_app(db_path=str(tmp_path / 'labels.sqlite3'), store=store, username='admin',
+                     password='correct-horse-battery', background=False,
+                     annotator_factory=FakeAnnotator)
+    published = tmp_path / 'archive' / LLM_SETTINGS_PATH
+    with TestClient(app) as client:
+        response = client.post('/settings/llm', headers=AUTH, follow_redirects=False, data={
+            'url': 'https://llm.example/v1', 'model': 'my-model', 'api_key': 'secret',
+            'receiver_mode': 'always'})
+        assert response.status_code == 303 and 'saved=llm' in response.headers['location']
+        app.state.worker.export()
+        assert json.loads(published.read_text()) == {
+            'mode': 'always', 'url': 'https://llm.example/v1', 'model': 'my-model',
+            'timeout': '60', 'api_key': 'secret'}
+        # Turning the receiver mode off keeps the rest and drops the key from SMB.
+        client.post('/settings/llm', headers=AUTH, data={'receiver_mode': 'off'})
+        app.state.worker.export()
+        payload = json.loads(published.read_text())
+        assert payload['mode'] == 'off' and 'api_key' not in payload
+        # A receiver mode that needs the key is rejected while saving.
+        result = client.post('/settings/llm', headers=AUTH, follow_redirects=False,
+                             data={'receiver_mode': 'always', 'clear_llm_api_key': '1'})
+        assert 'error' in result.headers['location']

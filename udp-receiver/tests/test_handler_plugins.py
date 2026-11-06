@@ -56,7 +56,10 @@ def test_nlu_recognises_sonos_playback_queue_and_volume_commands():
         'Przycisz o 10': ('volume_down', {'level': '10'}),
         'Ustaw głośność na 20 procent': ('volume_set', {'level': '20'}),
         'Następna piosenka': ('next_track', {}),
+        'Następne.': ('next_track', {}),
+        'Kolejne.': ('next_track', {}),
         'Poprzednia piosenka': ('previous_track', {}),
+        'Poprzednie.': ('previous_track', {}),
     }
     for text, (intent, entities) in cases.items():
         decision = nlu.decide(text)
@@ -238,10 +241,12 @@ def test_spotify_artist_playlist_and_direct_track_search():
 
     client = SpotifyClient('id', 'secret')
     calls = []
+    playlist_limits = []
 
     def search(query, types=('track', 'album', 'playlist', 'artist'), limit=5):
         calls.append((query, types))
         if types == ('playlist',):
+            playlist_limits.append(limit)
             return {'playlists': {'items': [
                 {'uri': 'spotify:playlist:fan', 'name': 'Pendulum hits',
                  'owner': {'id': 'fan'}},
@@ -258,6 +263,7 @@ def test_spotify_artist_playlist_and_direct_track_search():
     assert client.search_artist_playlist('Pendulum')['type'] == 'playlist'
     assert client.search_track('Bohemian Rhapsody')['uri'] == 'spotify:track:song'
     assert ('Bohemian Rhapsody', ('track',)) in calls
+    assert playlist_limits and max(playlist_limits) <= 10
     client.search = lambda query, **kwargs: {'playlists': {'items': [
         {'uri': 'spotify:playlist:fan', 'name': 'Pendulum hits'}]}}
     assert client.search_artist_playlist('Pendulum')['uri'] == 'spotify:playlist:fan'

@@ -145,7 +145,8 @@ class SpotifyClient:
         if not artist:
             raise SpotifyError('empty artist name')
         for query in (f'This Is {artist}', artist):
-            playlists = self._playlists(self.search(query, types=('playlist',), limit=20))
+            # Spotify's search endpoint rejects limit=20 for this app.
+            playlists = self._playlists(self.search(query, types=('playlist',), limit=10))
             if query == artist:
                 named = [item for item in playlists
                          if artist.casefold() in (item.get('name') or '').casefold()]

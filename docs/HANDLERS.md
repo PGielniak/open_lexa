@@ -64,9 +64,37 @@ model, attempt count and errors live in SQLite and the dataset export. Failed
 items retry up to three times. Only `status=new` rows are auto-annotated, and
 editing a row while a request runs prevents the LLM result from overwriting it.
 LLM annotation has its own background thread so a slow model does not delay
-SMB ingest/export. The LLM key stays in the admin's SQLite volume and is not
-published to SMB. Protect that volume, make backups, and restrict admin
-access; keep the archive SMB share private as it stores STT and Spotify keys.
+SMB ingest/export. The LLM key stays in the admin's SQLite volume; it reaches
+the archive only as part of `_config/llm.json` while the receiver mode is on
+(see below). Protect that volume, make backups, and restrict admin access;
+keep the archive SMB share private as it stores STT, Spotify and (when the
+receiver LLM is enabled) LLM keys.
+
+## LLM recognition on the receiver
+
+The receiver can also ask an LLM right after each transcription, before
+dispatching to handlers. The single source of truth is **Ustawienia → LLM**:
+besides URL, model and key it has a *receiver mode* (off / fallback / always).
+Saving publishes `_config/llm.json` (key included only while the mode is on)
+and the receiver polls it like the STT settings, so no second key entry in
+`.env` is needed. Without an archive the LLM_* environment variables work the
+same way: `LLM_MODEL` and `LLM_API_KEY` (Secret), optionally `LLM_URL` and
+`LLM_TIMEOUT`. Precedence: `--llm-mode` (reads no file), `_config/llm.json`,
+environment. `LLM_INTENT_MODE=always` decides intent and entities for every
+transcript (the default once key and model are set), `fallback` asks only when
+the lexicon and regex rules recognised nothing, and `off` disables it. An
+invalid or missing file never drops a running client (warning in the log),
+matching the STT settings behaviour. The prompt embeds the
+published lexicon — intents with their phrases and entity types — and the
+answer is validated against it: the receiver's model may only reuse existing
+labels, never create intents or entity types (that stays the admin annotation
+job). Without an SMB archive the prompt falls back to the regex-rule command
+names. `noise` and `not_for_me` stay non-actionable, exactly like in the
+lexicon. Any failure (network, invalid JSON, unknown label) is logged, counted
+in `/healthz` under `llm`, and the lexicon/rules decision stands, so an
+unreachable endpoint never breaks the voice pipeline. Recognised entities are
+canonical values (`number` entities are normalised to digits), which is what
+handlers like Sonos expect.
 
 ## Sonos / Spotify
 
