@@ -40,7 +40,9 @@ i handler wybiera domyślne źródło.
 ```
 play_music            „włącz muzykę”               → handler: domyślne/ostatnie źródło
 ├── play_spotify      „puść drum and bass na spotify”  + search_query="drum and bass"
-└── play_radio        „włącz RMF”                  + station=RMF24
+├── play_radio        „włącz RMF FM”               + station="RMF FM"
+├── play_default_radio „włącz radio”              → handler: default_radio (Radio Zet)
+└── play_random_radio „włącz losowe radio”
 stop                  „stop”, „wyłącz muzykę”
 volume_up / volume_down / volume_set              + level=30
 lights_on / lights_off                            + room=kuchnia

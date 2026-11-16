@@ -1,4 +1,4 @@
-"""Admin UI for labeling recordings: listen, correct the transcript, tag intent + entities."""
+"""Admin UI for recordings, transcription review, and receiver settings."""
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -24,7 +24,6 @@ from fastapi.templating import Jinja2Templates
 
 from open_lexa import settings as stt_settings
 from open_lexa.audio import wav_bytes
-from open_lexa.commands import decide
 from open_lexa.handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH
 from open_lexa.handlers import discover as discover_handlers
 from open_lexa.llm import SETTINGS_PATH as LLM_SETTINGS_PATH
@@ -37,49 +36,35 @@ from . import db, llm
 
 LOG = logging.getLogger('open_lexa.admin')
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
-LEXICON_PATH = '_lexicon/lexicon.json'
-DATASET_PATH = '_dataset/labels.jsonl'
+DATASET_PATH = '_dataset/transcripts.jsonl'
 PAGE_SIZE = 50
 # Same limit as UDP recordings and the local Whisper API.
 MAX_UPLOAD_SECONDS = MAX_BYTES // (RATE * 2)
 MAX_UPLOAD_BYTES = MAX_BYTES + 4096
 ORIGINS = ('browser', 'upload')
 # Flat form fields for the sonos section of _config/handlers.json.
-SONOS_DEFAULTS = {'enabled': '', 'speaker_ip': '', 'default_favorite': '', 'volume_step': '5',
+SONOS_DEFAULTS = {'enabled': '', 'speaker_ip': '', 'default_favorite': '', 'default_radio': '',
+                  'radio_stations': '', 'volume_step': '5',
                   'volume_max': '60', 'timeout': '5', 'spotify_client_id': '',
                   'spotify_client_secret': '', 'spotify_market': 'PL'}
-MANUAL_ANNOTATE_LIMIT = 500
 
 
 class Worker:
-    """Background ingest (every ``interval`` s) and debounced export after label changes.
+    """Background ingest and debounced settings/dataset export."""
 
-    A failed export stays pending and is retried every ``interval`` s, so a broken
-    share never silently drops labels from the lexicon.
-    """
-
-    def __init__(self, db_path: str, store: Store, interval: float = 60, debounce: float = 2,
-                 annotator_factory: Callable[[dict], 'llm.Annotator'] = llm.Annotator):
+    def __init__(self, db_path: str, store: Store, interval: float = 60, debounce: float = 2):
         self.db_path = db_path
         self.store = store
         self.interval = interval
         self.debounce = debounce
-        self.annotator_factory = annotator_factory
         self.export_due: float | None = 0.0  # export once at startup
         self.wake = threading.Event()
-        self.annotate_wake = threading.Event()
         self.stopping = threading.Event()
         self.lock = threading.Lock()
-        self.annotation_gate = threading.Lock()
         self.last_ingest: float | None = None
         self.last_export: float | None = None
-        self.last_annotate: float | None = None
-        self.annotating = False
-        self.manual_annotate_limit: int | None = None
         self.errors: dict[str, str] = {}
         self.thread = threading.Thread(target=self._run, name='admin-worker', daemon=True)
-        self.annotation_thread = threading.Thread(target=self._run_annotate,
-                                                  name='admin-annotate', daemon=True)
 
     @property
     def last_error(self) -> str | None:
@@ -87,14 +72,11 @@ class Worker:
 
     def start(self) -> None:
         self.thread.start()
-        self.annotation_thread.start()
 
     def stop(self) -> None:
         self.stopping.set()
         self.wake.set()
-        self.annotate_wake.set()
         self.thread.join(timeout=15)
-        self.annotation_thread.join(timeout=2)
 
     def mark_changed(self) -> None:
         self.export_due = time.monotonic() + self.debounce
@@ -114,7 +96,7 @@ class Worker:
         with self.lock:
             conn = db.connect(self.db_path)
             try:
-                lexicon, dataset = db.export(conn)
+                dataset = db.export_dataset(conn)
                 settings = db.get_setting(conn, 'stt')
                 handlers = db.get_setting(conn, 'handlers')
                 llm_settings = db.get_setting(conn, 'llm')
@@ -128,129 +110,13 @@ class Worker:
                 # Handler plugin configuration; see open_lexa.handlers.
                 self.store.write_atomic(HANDLERS_CONFIG_PATH, json.dumps(
                     handlers, ensure_ascii=False, indent=1).encode())
-            self.store.write_atomic(LEXICON_PATH, json.dumps(lexicon, ensure_ascii=False, indent=1).encode())
             self.store.write_atomic(DATASET_PATH, ''.join(
                 json.dumps(row, ensure_ascii=False) + '\n' for row in dataset).encode())
             if llm_settings is not None:
-                # The receiver's LLM NLU polls this file; see open_lexa.llm.
-                # Published last: a broken LLM section must not block the lexicon.
                 self.store.write_atomic(LLM_SETTINGS_PATH, json.dumps(
                     llm.publish_payload(llm_settings), ensure_ascii=False, indent=1).encode())
             self.last_export = time.time()
-            LOG.info('Exported lexicon (%d examples) and %d dataset rows', len(lexicon['examples']), len(dataset))
-
-    # --- LLM annotation -------------------------------------------------------------
-
-    def _load_annotation_batch(self, *, auto: bool, limit: int | None,
-                               recording_id: int | None = None):
-        """Read settings + pending rows under the lock; LLM calls happen outside it."""
-        with self.lock:
-            conn = db.connect(self.db_path)
-            try:
-                settings = db.get_setting(conn, 'llm')
-                if auto and not (settings or {}).get('auto_label'):
-                    return settings, [], {}
-                if not llm.llm_enabled(settings):
-                    raise llm.LLMConfigError('LLM nie jest skonfigurowany (Ustawienia → LLM: URL, model, klucz API)')
-                if recording_id is not None:
-                    row = db.get_recording(conn, recording_id)
-                    if row is None:
-                        raise llm.LLMError(f'nagranie {recording_id} nie istnieje')
-                    rows = [row]
-                else:
-                    rows = db.pending_annotation(conn, limit or int(settings.get('batch_size') or 5))
-                pending = [(row['id'], row['corrected_transcript'] or row['original_transcript'],
-                            db.annotation_of(row).get('attempts', 0)) for row in rows]
-                pending = [(rid, text, attempts) for rid, text, attempts in pending if (text or '').strip()]
-                snapshot = llm.dictionary_snapshot(conn) if pending else {}
-            finally:
-                conn.close()
-        return settings, pending, snapshot
-
-    def _record_annotation_error(self, recording_id: int, error: Exception, attempts: int,
-                                 model: str = '') -> None:
-        try:
-            with self.lock:
-                conn = db.connect(self.db_path)
-                try:
-                    row = db.get_recording(conn, recording_id)
-                    if row is not None and row['status'] == 'new':
-                        db.set_annotation(conn, recording_id, {
-                            'source': 'llm', 'model': model, 'prompt_version': llm.PROMPT_VERSION,
-                            'at': db.utcnow(), 'attempts': attempts, 'status': 'error',
-                            'error': str(error)[:300]})
-                finally:
-                    conn.close()
-        except Exception:
-            LOG.exception('Recording the annotation error for %d failed', recording_id)
-
-    def annotate_pending(self, *, auto: bool = False, limit: int | None = None) -> tuple[int, int]:
-        """Label pending recordings with the LLM; returns (labeled, failed)."""
-        with self.annotation_gate:
-            return self._annotate_pending(auto=auto, limit=limit)
-
-    def _annotate_pending(self, *, auto: bool, limit: int | None) -> tuple[int, int]:
-        settings, pending, snapshot = self._load_annotation_batch(auto=auto, limit=limit)
-        if not pending:
-            return 0, 0
-        self.annotating = True
-        try:
-            annotator = self.annotator_factory(settings)
-            labeled = failed = 0
-            for recording_id, transcript, attempts in pending:
-                if self.stopping.is_set():
-                    break
-                try:
-                    answer = annotator.annotate(transcript, snapshot)  # slow; outside the lock
-                except Exception as exc:
-                    failed += 1
-                    LOG.warning('LLM annotation of recording %d failed: %s', recording_id, exc)
-                    self._record_annotation_error(recording_id, exc, attempts + 1,
-                                                  settings.get('model', ''))
-                    continue
-                try:
-                    with self.lock:
-                        conn = db.connect(self.db_path)
-                        try:
-                            llm.apply_annotation(conn, recording_id, answer,
-                                                 model=settings['model'], attempts=attempts + 1,
-                                                 expected_transcript=transcript)
-                        finally:
-                            conn.close()
-                except Exception as exc:
-                    failed += 1
-                    LOG.warning('Applying the LLM label to recording %d failed: %s', recording_id, exc)
-                    self._record_annotation_error(recording_id, exc, attempts + 1,
-                                                  settings.get('model', ''))
-                else:
-                    labeled += 1
-            if labeled:
-                self.mark_changed()
-            self.last_annotate = time.time()
-            LOG.info('LLM annotation: %d labeled, %d failed', labeled, failed)
-            return labeled, failed
-        finally:
-            self.annotating = False
-
-    def annotate_one(self, recording_id: int) -> dict:
-        """Annotate a single recording synchronously; raises llm.LLMError on failure."""
-        settings, pending, snapshot = self._load_annotation_batch(auto=False, limit=None,
-                                                                  recording_id=recording_id)
-        if not pending:
-            raise llm.LLMError('to nagranie nie ma transkrypcji do oznaczenia')
-        rid, transcript, attempts = pending[0]
-        annotator = self.annotator_factory(settings)
-        answer = annotator.annotate(transcript, snapshot)
-        with self.lock:
-            conn = db.connect(self.db_path)
-            try:
-                annotation = llm.apply_annotation(conn, rid, answer, model=settings['model'],
-                                                  attempts=attempts + 1,
-                                                  expected_transcript=transcript)
-            finally:
-                conn.close()
-        self.mark_changed()
-        return annotation
+            LOG.info('Exported %d dataset rows', len(dataset))
 
     def _task(self, name: str, operation) -> bool:
         try:
@@ -284,17 +150,6 @@ class Worker:
                           self.export_due if self.export_due is not None else next_ingest)
             self.wake.wait(max(0.05, wake_at - time.monotonic()))
             self.wake.clear()
-
-    def _run_annotate(self) -> None:
-        # Independent from SMB ingest/export: a slow LLM never blocks either.
-        while not self.stopping.is_set():
-            self.annotate_wake.wait(max(self.interval, 30.0))
-            self.annotate_wake.clear()
-            if not self.stopping.is_set():
-                limit = self.manual_annotate_limit
-                self.manual_annotate_limit = None
-                self._task('annotate', lambda: self.annotate_pending(auto=limit is None, limit=limit))
-
 
 def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
     """Single 'bytes=a-b' range -> inclusive (start, end); None when absent or unsupported."""
@@ -333,10 +188,10 @@ def read_pcm16k(data: bytes) -> bytes:
 def create_app(*, db_path: str, store: Store, username: str, password: str,
                background: bool = True, interval: float = 60,
                transcriber_factory: Callable[[dict], Transcriber] = stt_settings.build_transcriber,
-               annotator_factory: Callable[[dict], 'llm.Annotator'] = llm.Annotator) -> FastAPI:
+               llm_test_factory: Callable[[dict], 'llm.ConnectionTest'] = llm.ConnectionTest) -> FastAPI:
     conn = db.open_db(db_path)
     conn.close()
-    worker = Worker(db_path, store, interval=interval, annotator_factory=annotator_factory)
+    worker = Worker(db_path, store, interval=interval)
     basic = HTTPBasic(realm='Open Lexa admin')
     # Discovered once: the receiver executes these; the admin only shows them.
     handler_plugins = discover_handlers()
@@ -372,7 +227,6 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
     @app.get('/healthz', include_in_schema=False)
     def healthz():
         return {'status': 'ok', 'last_ingest': worker.last_ingest, 'last_export': worker.last_export,
-                'last_annotate': worker.last_annotate, 'annotating': worker.annotating,
                 'last_error': worker.last_error}
 
     protected = [Depends(auth)]
@@ -385,19 +239,19 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         return RedirectResponse('/recordings?status=new', http.HTTP_303_SEE_OTHER)
 
     @app.get('/recordings', dependencies=protected, response_class=HTMLResponse)
-    def recordings(request: Request, status: str | None = None, intent: str | None = None, page: int = 1,
+    def recordings(request: Request, status: str | None = None, page: int = 1,
                    conn=Depends(database)):
         status = status if status in db.STATUSES else None
         page = max(page, 1)
-        rows = db.list_recordings(conn, status=status, intent=intent or None,
+        rows = db.list_recordings(conn, status=status,
                                   limit=PAGE_SIZE + 1, offset=(page - 1) * PAGE_SIZE)
 
         def link(**changes) -> str:
-            params = {'status': status, 'intent': intent, 'page': page, **changes}
+            params = {'status': status, 'page': page, **changes}
             return '/recordings?' + urlencode({k: v for k, v in params.items() if v})
 
         return render(request, 'list.html', rows=rows[:PAGE_SIZE], counts=db.counts(conn), status=status,
-                      intent=intent, intents=db.intents(conn), page=page, link=link,
+                      page=page, link=link,
                       has_next=len(rows) > PAGE_SIZE)
 
     @app.get('/recordings/{recording_id}', dependencies=protected, response_class=HTMLResponse)
@@ -406,11 +260,10 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         if row is None:
             raise HTTPException(http.HTTP_404_NOT_FOUND)
         warnings = request.query_params.getlist('warning')
-        return render(request, 'detail.html', r=row, entities=db.recording_entities(conn, recording_id),
-                       intents=db.intents(conn), entity_types=db.entity_types(conn),
+        return render(request, 'detail.html', r=row,
                        transcripts=db.transcript_map(row['transcripts']),
-                       allowed=db.intent_entity_map(conn), saved=saved, warnings=warnings,
-                       annotation=db.annotation_of(row))
+                       saved=saved, warnings=warnings,
+                       agent=json.loads(row['agent']) if row['agent'] else None)
 
     @app.post('/recordings/{recording_id}', dependencies=protected)
     async def save(request: Request, recording_id: int, conn=Depends(database)):
@@ -418,17 +271,12 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
             raise HTTPException(http.HTTP_404_NOT_FOUND)
         form = await request.form()
         action = form.get('action', 'save')
-        entities = [{'type': t, 'value': v, 'original_fragment': f} for t, v, f in zip(
-            form.getlist('entity_type'), form.getlist('entity_value'), form.getlist('entity_fragment'))]
-        try:
-            warnings = db.save_label(
-                conn, recording_id, corrected_transcript=form.get('corrected_transcript', ''),
-                intent=form.get('intent') or None, entities=entities,
-                status='skipped' if action == 'skip' else ('new' if action == 'reset' else 'labeled'),
-                notes=form.get('notes'))
-        except ValueError as exc:
-            return RedirectResponse(f'/recordings/{recording_id}?' + urlencode({'warning': str(exc)}),
-                                    http.HTTP_303_SEE_OTHER)
+        new_status = 'skipped' if action == 'skip' else ('new' if action == 'reset' else 'labeled')
+        with conn:
+            conn.execute('UPDATE recordings SET corrected_transcript = ?, status = ?, notes = ?, labeled_at = ? WHERE id = ?',
+                         (str(form.get('corrected_transcript') or '').strip() or None,
+                          new_status, str(form.get('notes') or '').strip() or None,
+                          db.utcnow(), recording_id))
         worker.mark_changed()
         # Preserve provenance but mark a subsequent human correction as reviewed.
         if action != 'reset':
@@ -436,11 +284,8 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
             if annotation.get('source') == 'llm':
                 annotation['reviewed_at'] = db.utcnow()
                 db.set_annotation(conn, recording_id, annotation)
-        target = recording_id
-        if action in ('next', 'skip') and not warnings:
-            target = db.next_unlabeled(conn, recording_id) or recording_id
-        query = urlencode([('saved', 1)] + [('warning', w) for w in warnings])
-        return RedirectResponse(f'/recordings/{target}?{query}', http.HTTP_303_SEE_OTHER)
+        target = db.next_unlabeled(conn, recording_id) if action in ('next', 'skip') else None
+        return RedirectResponse(f'/recordings/{target or recording_id}?saved=1', 303)
 
     @app.get('/recordings/{recording_id}/audio', dependencies=protected)
     def audio(request: Request, recording_id: int, conn=Depends(database)):
@@ -461,64 +306,6 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         headers['Content-Range'] = f'bytes {start}-{end}/{len(data)}'
         return Response(data[start:end + 1], status_code=http.HTTP_206_PARTIAL_CONTENT,
                         media_type='audio/wav', headers=headers)
-
-    @app.get('/recordings/{recording_id}/suggest', dependencies=protected)
-    def suggest(recording_id: int, value: str = '', conn=Depends(database)):
-        row = db.get_recording(conn, recording_id)
-        if row is None:
-            raise HTTPException(http.HTTP_404_NOT_FOUND)
-        return JSONResponse({'fragment': db.suggest_fragment(row['original_transcript'], value)})
-
-    @app.get('/dictionary', dependencies=protected, response_class=HTMLResponse)
-    def dictionary(request: Request, conn=Depends(database)):
-        return render(request, 'dictionary.html', intents=db.intents(conn), phrases=db.phrases(conn),
-                      entity_types=db.entity_types(conn), values=db.dictionary(conn),
-                      allowed=db.intent_entity_map(conn))
-
-    @app.post('/dictionary', dependencies=protected)
-    async def edit_dictionary(request: Request, conn=Depends(database)):
-        form = await request.form()
-        action = form.get('action')
-        try:
-            with conn:
-                if action == 'add_intent':
-                    name = db.normalize(form.get('name', '')).replace(' ', '_')
-                    if not name:
-                        raise ValueError('nazwa intencji jest wymagana')
-                    conn.execute('INSERT INTO intents (name, parent_id, description, is_actionable) '
-                                 'VALUES (?, (SELECT id FROM intents WHERE name = ?), ?, ?)',
-                                 (name, form.get('parent') or None, form.get('description') or None,
-                                  0 if form.get('non_actionable') else 1))
-                    for entity_type in form.getlist('entity_types'):
-                        conn.execute('INSERT OR IGNORE INTO intent_entity_types (intent_id, entity_type_id) '
-                                     'SELECT i.id, t.id FROM intents i, entity_types t WHERE i.name = ? '
-                                     'AND t.name = ?', (name, entity_type))
-                elif action == 'add_phrase':
-                    conn.execute('INSERT OR IGNORE INTO intent_phrases (intent_id, phrase) '
-                                 'SELECT id, ? FROM intents WHERE name = ?',
-                                 (form.get('phrase', '').strip(), form.get('intent')))
-                elif action == 'delete_phrase':
-                    conn.execute('DELETE FROM intent_phrases WHERE id = ?', (form.get('id'),))
-                elif action == 'add_value':
-                    value_id = db.ensure_value(conn, form.get('entity_type', ''), form.get('value', ''))
-                    for synonym in form.get('synonyms', '').split(','):
-                        db.add_synonym(conn, value_id, synonym)
-                elif action == 'add_synonym':
-                    db.add_synonym(conn, int(form.get('value_id')), form.get('synonym', ''))
-                elif action == 'delete_synonym':
-                    conn.execute('DELETE FROM entity_synonyms WHERE id = ?', (form.get('id'),))
-                elif action == 'delete_value':
-                    conn.execute('DELETE FROM entity_values WHERE id = ? AND id NOT IN '
-                                 '(SELECT entity_value_id FROM recording_entities '
-                                 'WHERE entity_value_id IS NOT NULL)', (form.get('id'),))
-                else:
-                    raise ValueError(f'nieznana akcja {action!r}')
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(http.HTTP_400_BAD_REQUEST, str(exc)) from exc
-        except db.sqlite3.IntegrityError as exc:
-            raise HTTPException(http.HTTP_409_CONFLICT, str(exc)) from exc
-        worker.mark_changed()
-        return RedirectResponse('/dictionary', http.HTTP_303_SEE_OTHER)
 
     def mask_key(key: str) -> str:
         return f'…{key[-4:]}' if len(key) >= 12 else ('ustawiony' if key else '')
@@ -545,10 +332,35 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
                       llm=llm_current, llm_stored=llm_stored is not None, llm_key_hint=mask_key(llm_key),
                       sonos=sonos, sonos_stored=bool(handlers_stored),
                       spotify_secret_hint=mask_key(spotify_secret),
-                      plugins=[{'id': h.id, 'version': h.version, 'intents': sorted(h.intents),
+                       plugins=[{'id': h.id, 'version': h.version, 'intents': sorted(h.intents),
                                 'enabled': bool(handlers_stored.get(h.id, {}).get('enabled'))}
                                for h in handler_plugins],
-                      saved=saved, error=error)
+                       mcp_servers=[{'id': sid, 'url': spec.get('url', ''),
+                                     'enabled': spec.get('enabled', False),
+                                     'has_key': bool(spec.get('api_key'))}
+                                    for sid, spec in (handlers_stored.get('mcp_servers') or {}).items()],
+                       saved=saved, error=error)
+
+    @app.post('/settings/mcp', dependencies=protected)
+    async def save_mcp(request: Request, conn=Depends(database)):
+        form = await request.form()
+        server_id = str(form.get('server_id') or '').strip()
+        url = str(form.get('url') or '').strip()
+        if not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,39}', server_id) or server_id == 'sonos':
+            return RedirectResponse('/settings?' + urlencode({'error': 'MCP: niepoprawne ID serwera'}), 303)
+        handlers = db.get_setting(conn, 'handlers') or {}
+        servers = handlers.setdefault('mcp_servers', {})
+        if form.get('delete'):
+            servers.pop(server_id, None)
+        else:
+            if not url.startswith(('http://', 'https://')):
+                return RedirectResponse('/settings?' + urlencode({'error': 'MCP: URL musi zaczynać się od http:// lub https://'}), 303)
+            old = servers.get(server_id, {})
+            servers[server_id] = {'url': url, 'enabled': bool(form.get('enabled')),
+                                  'api_key': str(form.get('api_key') or '').strip() or old.get('api_key', '')}
+        db.set_setting(conn, 'handlers', handlers)
+        worker.mark_changed()
+        return RedirectResponse('/settings?saved=mcp', 303)
 
     @app.post('/settings', dependencies=protected)
     async def save_settings(request: Request, conn=Depends(database)):
@@ -590,7 +402,6 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         raw = {key: (form.get(key) or '').strip() if form.get(key) is not None else ''
                for key in llm.LLM_DEFAULTS}
         raw = {key: (value or stored.get(key, '')) for key, value in raw.items()}
-        raw['auto_label'] = '1' if form.get('auto_label') else ''
         raw['api_key'] = ('' if form.get('clear_llm_api_key') else
                           ((form.get('api_key') or '').strip() or stored.get('api_key', '')))
         try:
@@ -598,18 +409,13 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         except llm.LLMConfigError as exc:
             return RedirectResponse('/settings?' + urlencode({'error': f'LLM: {exc}'}),
                                     http.HTTP_303_SEE_OTHER)
-        if settings['auto_label'] and not settings['api_key']:
-            return RedirectResponse('/settings?' + urlencode({'error': 'LLM: podaj klucz API dla automatycznego oznaczania'}),
-                                    http.HTTP_303_SEE_OTHER)
         if settings['receiver_mode'] != 'off' and not settings['api_key']:
             return RedirectResponse('/settings?' + urlencode({'error': 'LLM: tryb odbiornika wymaga klucza API'}),
                                     http.HTTP_303_SEE_OTHER)
         db.set_setting(conn, 'llm', settings)
         worker.mark_changed()  # publish _config/llm.json for the receiver
-        worker.annotate_wake.set()
-        LOG.info('LLM settings saved (%s / %s, auto=%s, receiver=%s)', settings['url'],
-                 settings['model'], 'on' if settings['auto_label'] else 'off',
-                 settings['receiver_mode'])
+        LOG.info('LLM settings saved (%s / %s, receiver=%s)', settings['url'],
+                 settings['model'], settings['receiver_mode'])
         return RedirectResponse('/settings?saved=llm', http.HTTP_303_SEE_OTHER)
 
     @app.post('/settings/llm-test', dependencies=protected)
@@ -621,8 +427,8 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
                'model': (form.get('model') or '').strip() or stored.get('model', ''),
                'api_key': (form.get('api_key') or '').strip() or stored.get('api_key', '')}
         try:
-            annotator = annotator_factory(llm.validate_llm(raw))
-            message = await run_in_threadpool(annotator.test)
+            tester = llm_test_factory(llm.validate_llm(raw))
+            message = await run_in_threadpool(tester.test)
         except Exception as exc:
             return JSONResponse({'ok': False, 'error': str(exc)})
         return JSONResponse({'ok': True, 'message': message})
@@ -643,6 +449,8 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
             'enabled': bool(form.get('enabled')),
             'speaker_ip': field('speaker_ip', sonos_stored),
             'default_favorite': field('default_favorite', sonos_stored),
+            'default_radio': field('default_radio', sonos_stored),
+            'radio_stations': field('radio_stations', sonos_stored),
             'volume_step': str(form.get('volume_step') or sonos_stored.get('volume_step') or '5').strip(),
             'volume_max': str(form.get('volume_max') or sonos_stored.get('volume_max') or '60').strip(),
             'timeout': str(form.get('timeout') or sonos_stored.get('timeout') or '5').strip(),
@@ -742,57 +550,6 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
             return JSONResponse({'ok': False, 'error': str(exc)})
         return JSONResponse({'ok': result['status'] == 'handled', **result})
 
-    @app.post('/annotate', dependencies=protected)
-    def annotate_all(conn=Depends(database)):
-        """Kick off background LLM labeling of every pending recording."""
-        if not llm.llm_enabled(db.get_setting(conn, 'llm')):
-            return RedirectResponse('/settings?' + urlencode({'error': 'Skonfiguruj klucz API LLM'}),
-                                    http.HTTP_303_SEE_OTHER)
-        if not background:
-            # Tests/offline runs with no worker still need an explicit batch.
-            threading.Thread(target=_annotate_all_background, name='annotate', daemon=True).start()
-        else:
-            worker.manual_annotate_limit = MANUAL_ANNOTATE_LIMIT
-            worker.annotate_wake.set()
-        return RedirectResponse('/recordings?status=new&annotate=started', http.HTTP_303_SEE_OTHER)
-
-    @app.get('/annotate/status', dependencies=protected)
-    def annotation_status(conn=Depends(database)):
-        """Progress summary without exposing transcript or API credentials."""
-        pending = conn.execute(
-            "SELECT count(*) FROM recordings WHERE status = 'new' "
-            "AND coalesce(corrected_transcript, original_transcript, '') != '' "
-            "AND (annotation IS NULL OR json_extract(annotation, '$.status') = 'error')"
-        ).fetchone()[0]
-        labeled = conn.execute(
-            "SELECT count(*) FROM recordings WHERE status = 'labeled' "
-            "AND json_extract(annotation, '$.source') = 'llm'").fetchone()[0]
-        failed = conn.execute(
-            "SELECT count(*) FROM recordings WHERE status = 'new' "
-            "AND json_extract(annotation, '$.status') = 'error'").fetchone()[0]
-        return {'running': worker.annotating, 'pending': pending,
-                'labeled': labeled, 'failed': failed, 'last_at': worker.last_annotate}
-
-    def _annotate_all_background() -> None:
-        try:
-            worker.annotate_pending(limit=MANUAL_ANNOTATE_LIMIT)
-        except Exception:
-            LOG.exception('Background LLM annotation failed')
-
-    @app.post('/recordings/{recording_id}/annotate', dependencies=protected)
-    def annotate_recording(recording_id: int):
-        try:
-            annotation = worker.annotate_one(recording_id)
-        except (llm.LLMError, llm.LLMConfigError, ValueError) as exc:
-            return RedirectResponse(f'/recordings/{recording_id}?' + urlencode({'warning': str(exc)}),
-                                    http.HTTP_303_SEE_OTHER)
-        except Exception as exc:  # unexpected: surface it, keep the recording untouched
-            LOG.exception('LLM annotation of recording %d failed', recording_id)
-            return RedirectResponse(f'/recordings/{recording_id}?' + urlencode({'warning': str(exc)}),
-                                    http.HTTP_303_SEE_OTHER)
-        return RedirectResponse(f'/recordings/{recording_id}?saved=1&llm={annotation["intent"]}',
-                                http.HTTP_303_SEE_OTHER)
-
     @app.get('/record', dependencies=protected, response_class=HTMLResponse)
     def record_page(request: Request, conn=Depends(database)):
         stored = db.get_setting(conn, 'stt')
@@ -859,8 +616,6 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
                         meta['corrected_text'] = meta['text']
                         meta['corrected_source'] = chosen.role or mode
                         meta['model'] = chosen.model or meta.get('model')
-                        decision = decide(meta['text'])
-                        meta.update(command=decision.command, reply=decision.reply)
             audio_path = f'{created[:10]}/{stem}.wav'
             with worker.lock:  # no ingest between the WAV and its sidecar
                 store.write_atomic(audio_path, wav_bytes(pcm))

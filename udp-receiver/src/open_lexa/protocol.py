@@ -35,6 +35,8 @@ class Recording:
     peer: Peer
     session: int
     pcm: bytes
+    receive_started: float | None = None
+    received_at: float | None = None
 
 
 @dataclass
@@ -98,7 +100,8 @@ class Receiver:
         partial.chunks[seq] = payload
         if len(partial.chunks) == count:
             # Keep the partial when the STT queue is full; sender retries its final packet.
-            recording = Recording(peer, session, b''.join(partial.chunks[i] for i in range(count)))
+            recording = Recording(peer, session, b''.join(partial.chunks[i] for i in range(count)),
+                                  partial.created, now)
             if not deliver(recording):
                 return None
             del self.pending[key]

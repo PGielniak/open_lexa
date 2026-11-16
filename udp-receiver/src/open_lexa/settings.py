@@ -30,7 +30,7 @@ DEFAULTS = {
     # Base is the default for comparison on Polish recordings; the portal can
     # switch to 'whisper-small' (or 'whisper-1' = the
     # Whisper API's own default). See whisper-api/deploy/configmap.yaml.
-    'local_model': 'whisper-base',
+    'local_model': 'whisper-medium',
     'cloud_url': 'https://api.openai.com/v1',
     'cloud_model': 'gpt-transcribe',
     'cloud_api_key': '',

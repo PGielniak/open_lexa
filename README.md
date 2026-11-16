@@ -107,6 +107,8 @@ Jeśli Nano nie pojawia się przy wgrywaniu, dwukrotnie naciśnij RESET, wybierz
 
 ## 4. Odbiornik UDP
 
+Tracing i jego ograniczenia opisano w [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+
 Odbiornik jest osobną usługą: ten sam pakiet działa lokalnie i w k3s; adres `0.0.0.0:12345/UDP` jest domyślny. Firmware i odbiornik muszą być w tej samej sieci LAN (albo w sieci, której firewall przepuszcza UDP); ESP32 łączy się z Wi-Fi 2,4 GHz. Port domyślny: **12345/UDP**.
 
 ### Backendy STT
@@ -147,8 +149,7 @@ dostępny tylko dla Open Lexy.
 `transcripts.local` i `transcripts.cloud` (tekst, model, błąd, czas),
 `corrected_text` oraz `corrected_source`. Admin wczytuje tekst GPT jako
 `corrected_transcript`, pokazuje obie wersje do porównania i pozwala jednym
-kliknięciem wstawić lokalną wersję. W praktyce wystarczy więc dodać intencję i
-encje — tekstu nie trzeba przepisywać. Jeśli wcześniej zapisano tryb `local`
+kliknięciem wstawić lokalną wersję lub ręcznie poprawić tekst. Jeśli wcześniej zapisano tryb `local`
 albo `cloud`, otwórz *Ustawienia*, wybierz `dual` i zapisz.
 
 
@@ -173,25 +174,12 @@ Następnie STT:
 
 Po zakończeniu wypowiedzi program wypisuje rozpoznany tekst. `--save-dir recordings` można stosować również z STT; WAV jest zapisywany przed wywołaniem backendu. Bez tej opcji audio pozostaje w pamięci. Logi trafiają na stderr, transkrypcja na stdout.
 
-Transkrypcja trafia do NLU opartego o eksportowany słownik (`_lexicon/lexicon.json`); przy jego braku funkcja `decide()` z [`commands.py`](udp-receiver/src/open_lexa/commands.py) zachowuje reguły regex jako awaryjne. Odbiornik przekazuje rozpoznaną intencję i encje do włączonych handlerów. Sonos/Spotify jest pierwszym pluginem (odtwarzanie, pauza, głośność); pozostałe intencje bez handlera są tylko logowane i archiwizowane. Ustawienia STT, oznaczanie LLM, model Base/Small i konfiguracja Sonos są dostępne w panelu admina. Architektura oraz instrukcje uruchomienia: [`docs/HANDLERS.md`](docs/HANDLERS.md).
+Każda niepusta transkrypcja trafia do LLM z opisami narzędzi MCP włączonych serwerów. Model może wybrać narzędzie i jego argumenty; odbiornik sprawdza schemat i wykonuje wywołanie. Lokalny Sonos/Spotify i zewnętrzne serwery HTTP konfiguruje się w panelu admina. Bez LLM lub przy błędzie nie ma awaryjnego wykonania przez reguły NLU. Wynik trafia do sidecara w `agent`.
 
-**Rozpoznawanie intencji przez LLM (odbiornik).** Po każdej transkrypcji tekst może
-trafić bezpośrednio do LLM (dowolny endpoint Chat Completions zgodny z OpenAI).
-Wystarczy skonfigurować model w panelu admina (**Ustawienia → LLM**) i wybrać tryb
-odbiornika — URL, model, timeout i klucz API trafiają wtedy do `_config/llm.json`
-na udziale SMB (klucz tylko gdy tryb odbiornika jest włączony), więc nie trzeba go
-wpisywać drugi raz w `.env`. Alternatywnie, bez archiwum SMB: zmienne `LLM_MODEL`,
-`LLM_API_KEY` (Secret), `LLM_URL`, `LLM_TIMEOUT`. Tryb przez `LLM_INTENT_MODE` lub
-`--llm-mode`: `always` — model rozstrzyga intencję i encje dla każdego nagrania
-(domyślnie, gdy klucz i model są ustawione), `fallback` — LLM działa tylko, gdy
-słownik i reguły nic nie rozpoznały, `off` — wyłączone. Kolejność źródeł:
-`--llm-mode` (wyłącza odczyt pliku) > `_config/llm.json` > zmienne `LLM_*`. Model
-wybiera wyłącznie intencje i typy encji z opublikowanego słownika (bez słownika
-dostaje nazwy komend z reguł regex); nigdy nie tworzy nowych etykiet — to rola
-oznaczania w adminie. Błędna lub niedostępna odpowiedź LLM nie przerywa potoku:
-zostaje decyzja leksykalna/regułowa; niepoprawny plik zostawia działający klient
-(`WARNING` w logu). Rozpoznanie trafia do handlerów i do sidecara archiwum z
-`source: "llm"`, a liczniki wywołań widać w `/healthz`.
+LLM skonfigurujesz w panelu albo zmiennymi `LLM_MODEL`, `LLM_API_KEY`,
+`LLM_URL` i `LLM_TIMEOUT`. Plik `_config/llm.json` na SMB ma pierwszeństwo
+przed zmiennymi; `--llm-mode` przypina konfigurację środowiska. Liczniki są w
+`/healthz`. Szczegóły: [HANDLERS.md](docs/HANDLERS.md).
 
 #### Archiwum SMB (do retrainingu)
 
@@ -264,10 +252,10 @@ szczególnie przy cichych nagraniach z ESP32, bez zmiany głośnych sygnałów. 
 
 - Model **WakeNet9 Alexa** działa na urządzeniu. Przed aktywacją audio nie jest wysyłane przez UDP ani do STT.
 - Sygnał: 880 Hz przez 100 ms, łagodne zbocza. Mów po sygnale; audio wypowiedziane w jego trakcie jest odrzucane.
-- Limit: 12 s od rozpoczęcia nagrania po sygnale. Zakończenie po 1 s ciszy. Brak co najmniej 200 ms aktywności w pierwszych 4 s powoduje pominięcie nagrania.
-- Koniec wypowiedzi wykrywany progiem energii RMS w oknach 20 ms. To prosty detektor, który wymaga dostrojenia do hałasu i odległości. `SPEECH_RMS=500`: zmniejsz dla cichego głosu, zwiększ, jeśli szum podtrzymuje nagranie. `SILENCE_MS=1000`: zwiększ, jeśli chcesz dłuższe pauzy.
+- Limit: 4 s od rozpoczęcia nagrania po sygnale. Zakończenie po 700 ms ciszy. Brak co najmniej 200 ms aktywności w pierwszych 2 s powoduje pominięcie nagrania.
+- Koniec wypowiedzi wykrywany progiem energii RMS w oknach 20 ms, z adaptacją do głośnej mowy i odpornością na pojedyncze 20 ms trzaski. `SPEECH_RMS=600`: zmniejsz dla cichego głosu, zwiększ, jeśli szum podtrzymuje nagranie. `SILENCE_MS=700`: zwiększ, jeśli chcesz dłuższe pauzy.
 - `MIC_GAIN_DB` obsługuje 0 lub 6 dB. Zacznij od 0 dB, jeśli słyszysz przesterowanie. `BEEP_VOLUME` reguluje głośność sygnału.
-- Zachowywane jest 250 ms przed pierwszą aktywnością oraz 300 ms po ostatniej. PCM zajmuje najwyżej 384 kB PSRAM.
+- Zachowywane jest 250 ms przed pierwszą aktywnością oraz 300 ms po ostatniej. PCM zajmuje najwyżej 128 kB PSRAM.
 - Wysyłka zaczyna się po zakończeniu nagrania, z ACK i ponawianiem pakietów. Niekompletne nagranie nie trafia do STT. Szczegóły: [protokół UDP](docs/UDP.md).
 - Podczas nagrywania/wysyłania kolejne aktywacje są ignorowane. Po przesłaniu wraca nasłuch Alexa, podczas gdy odbiornik transkrybuje w osobnym wątku. Brak odpowiedzi odbiornika kończy się komunikatem i powrotem do nasłuchu.
 
@@ -279,7 +267,7 @@ szczególnie przy cichych nagraniach z ESP32, bez zmiany głośnych sygnałów. 
 - `src/audio/` — resampling i granice nagrania, używane również w testach C++.
 - `src/model/` — osadzony model Alexa i manifest z SHA-256.
 - `firmware/build/` — `arduino.sh` (install/compile/upload), konfiguracja i odtwarzanie modelu.
-- `udp-receiver/src/open_lexa/` — odbiornik UDP, protokół, backendy STT (`stt.py`), NLU słownikowe i LLM (`nlu.py`, `llm.py`), archiwum i store SMB.
+- `udp-receiver/src/open_lexa/` — odbiornik UDP, protokół, backendy STT (`stt.py`), LLM i wywołania narzędzi MCP (`llm.py`, `tool_agent.py`), archiwum i store SMB.
 - `whisper-api/src/open_lexa_whisper/` — API OpenAI-compatible (`api.py`) i Whisper na HailoRT (`hailo.py`).
 - `admin-dashboard/src/open_lexa_admin/` — panel do oznaczania nagrań i ustawień STT.
 - `<komponent>/tests/` — testy; uruchamiane razem z roota.

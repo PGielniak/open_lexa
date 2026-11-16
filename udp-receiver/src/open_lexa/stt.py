@@ -18,10 +18,14 @@ import logging
 import os
 import time
 from typing import Mapping, Protocol
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.propagate import inject
 
 from .audio import wav_bytes
 
 LOG = logging.getLogger('open_lexa.stt')
+TRACER = trace.get_tracer('open_lexa.stt')
 
 BACKENDS = ('dual', 'openai', 'http', 'local', 'openai-compatible')
 
@@ -106,6 +110,11 @@ class OpenAITranscriber:
                 kwargs['extra_body'] = {'languages': [language]}
             else:
                 kwargs['language'] = language
+        if self.name == 'http':
+            headers: dict[str, str] = {}
+            inject(headers)
+            if headers:
+                kwargs['extra_headers'] = headers
         return self._client.audio.transcriptions.create(**kwargs).text.strip()
 
     def transcribe_all(self, pcm: bytes, language: str) -> list[TranscriptResult]:
@@ -114,6 +123,7 @@ class OpenAITranscriber:
         try:
             text = self.transcribe(pcm, language)
         except Exception as exc:
+            LOG.exception('stt_backend_error backend=%s model=%s', self.name, self.model)
             return [TranscriptResult(None, self.name, self.model, error=str(exc),
                                      latency_ms=round((time.monotonic() - started) * 1000))]
         return [TranscriptResult(text, self.name, self.model,
@@ -168,14 +178,24 @@ class DualTranscriber:
         try:
             text = transcriber.transcribe(pcm, language)
         except Exception as exc:
+            LOG.exception('stt_backend_error role=%s backend=%s model=%s', role,
+                          transcriber.name, getattr(transcriber, 'model', None))
             return TranscriptResult(None, transcriber.name, getattr(transcriber, 'model', None), role,
                                     str(exc), round((time.monotonic() - started) * 1000))
         return TranscriptResult(text, transcriber.name, getattr(transcriber, 'model', None), role,
                                 latency_ms=round((time.monotonic() - started) * 1000))
 
+    def _run_traced(self, ctx, role, transcriber, pcm, language):
+        token = otel_context.attach(ctx)
+        try:
+            with TRACER.start_as_current_span('stt.' + role):
+                return self._run(role, transcriber, pcm, language)
+        finally:
+            otel_context.detach(token)
+
     def transcribe_all(self, pcm: bytes, language: str) -> list[TranscriptResult]:
         futures = [
-            (role, self._executor.submit(self._run, role, transcriber, pcm, language))
+            (role, self._executor.submit(self._run_traced, otel_context.get_current(), role, transcriber, pcm, language))
             for role, transcriber in (('local', self.local), ('cloud', self.cloud))
         ]
         results = []
@@ -211,6 +231,8 @@ def transcribe_all(transcriber: Transcriber, pcm: bytes, language: str) -> list[
     try:
         text = transcriber.transcribe(pcm, language)
     except Exception as exc:
+        LOG.exception('stt_backend_error backend=%s model=%s', transcriber.name,
+                      getattr(transcriber, 'model', None))
         return [TranscriptResult(None, transcriber.name, getattr(transcriber, 'model', None),
                                  error=str(exc), latency_ms=round((time.monotonic() - started) * 1000))]
     return [TranscriptResult(text, transcriber.name, getattr(transcriber, 'model', None),

@@ -1,4 +1,4 @@
-"""Sonos playback handler: Spotify search, Sonos favorites, transport, volume.
+"""Sonos playback handler: Spotify search, TuneIn radio, favorites, transport, volume.
 
 Configuration section in ``_config/handlers.json`` (edited in the admin
 portal under Ustawienia → Sonos / Spotify)::
@@ -7,6 +7,8 @@ portal under Ustawienia → Sonos / Spotify)::
         "enabled": true,
         "speaker_ip": "192.168.1.42",
         "default_favorite": "Chill",        # Sonos favorite for bare "włącz muzykę"
+        "default_radio": "Radio Zet",       # station for bare "włącz radio"
+        "radio_stations": "Radio Zet, RMF FM, Radio 357",  # "włącz losowe radio" pool
         "volume_step": 5,
         "volume_max": 60,
         "timeout": 5,
@@ -16,15 +18,19 @@ portal under Ustawienia → Sonos / Spotify)::
 from __future__ import annotations
 
 import logging
+import random
+import re
 
-from ..base import CommandHandler, HandlerConfigError, HandlerResult
+from ..base import CommandHandler, HandlerConfigError, HandlerResult, MCPTool
 from .sonos import SonosError, SonosSpeaker
 from .spotify import SpotifyClient, SpotifyError
+from .tunein import TuneInClient, TuneInError, compact, is_generic_radio
 
 LOG = logging.getLogger('open_lexa.handlers.sonos')
 
 INTENTS = frozenset({
-    'play_music', 'play_spotify', 'queue_spotify', 'play_radio',
+    'play_music', 'play_spotify', 'queue_spotify',
+    'play_radio', 'play_default_radio', 'play_random_radio',
     'stop', 'pause', 'resume', 'next_track', 'previous_track',
     'volume_up', 'volume_down', 'volume_set',
 })
@@ -47,6 +53,25 @@ GENRES = {
 }
 
 
+DEFAULT_RADIO = 'Radio Zet'
+# Stations verified on TuneIn; extended by radio favorites at runtime.
+DEFAULT_RADIO_STATIONS = ('Radio Zet', 'RMF FM', 'Radio 357', 'Radio Nowy Świat',
+                          'Antyradio', 'TOK FM', 'Chillizet', 'ESKA')
+RANDOM_RADIO_ATTEMPTS = 3
+
+
+def _station_list(value) -> list[str]:
+    """Accept a list or a comma/newline separated string from the admin form."""
+    items = value if isinstance(value, (list, tuple)) else re.split(r'[,\n;]', str(value or ''))
+    stations, seen = [], set()
+    for item in items:
+        name = str(item).strip()
+        if name and compact(name) not in seen:
+            seen.add(compact(name))
+            stations.append(name)
+    return stations
+
+
 def _clamp(value, default: int, low: int, high: int) -> int:
     try:
         return max(low, min(high, int(value)))
@@ -61,12 +86,47 @@ class SonosHandler(CommandHandler):
     version = '1'
     intents = INTENTS
     priority = 50
+    tools = tuple(
+        MCPTool(name, description, {
+            'type': 'object', 'properties': properties,
+            'required': required, 'additionalProperties': False,
+        }) for name, description, properties, required in (
+            ('play_music', 'Włącz domyślną playlistę Sonos, np. „włącz muzykę”.', {}, []),
+            ('play_spotify', 'Włącz Spotify lub wyszukaj wskazaną muzykę. '
+             'Nie używaj dla stacji radiowych.',
+             {'search_query': {'type': 'string', 'description': 'Tytuł, artysta lub gatunek; pomiń dla domyślnej playlisty.'}}, []),
+            ('queue_spotify', 'Dodaj muzykę ze Spotify do kolejki.',
+             {'search_query': {'type': 'string', 'minLength': 1}}, ['search_query']),
+            ('play_radio', 'Włącz wskazaną stację radiową (TuneIn lub ulubione Sonos), '
+             'np. „włącz RMF FM”, „puść Radio 357”.',
+             {'station': {'type': 'string', 'minLength': 1,
+                          'description': 'Nazwa stacji w mianowniku, np. „RMF FM”, „Radio Zet”.'}},
+             ['station']),
+            ('play_default_radio', 'Włącz domyślne radio, gdy nie podano stacji, '
+             'np. „włącz radio”.', {}, []),
+            ('play_random_radio', 'Włącz losową stację radiową, np. „włącz losowe radio”.',
+             {}, []),
+            ('stop', 'Zatrzymaj muzykę.', {}, []),
+            ('pause', 'Wstrzymaj muzykę.', {}, []),
+            ('resume', 'Wznów odtwarzanie.', {}, []),
+            ('next_track', 'Odtwórz następny utwór.', {}, []),
+            ('previous_track', 'Odtwórz poprzedni utwór.', {}, []),
+            ('volume_up', 'Zwiększ głośność o opcjonalny krok.',
+             {'level': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
+            ('volume_down', 'Zmniejsz głośność o opcjonalny krok.',
+             {'level': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
+            ('volume_set', 'Ustaw głośność na podany poziom.',
+             {'level': {'type': 'integer', 'minimum': 0, 'maximum': 100}}, ['level']),
+        )
+    )
 
     # Overridable in tests; production builds the real clients lazily.
     speaker_factory = SonosSpeaker
     spotify_factory = SpotifyClient
+    tunein_factory = TuneInClient
     _speaker = None
     _spotify = None
+    _tunein = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -78,6 +138,9 @@ class SonosHandler(CommandHandler):
         if self.enabled and not self.speaker_ip:
             raise HandlerConfigError('speaker_ip is required when the handler is enabled')
         self.default_favorite = str(self.config.get('default_favorite') or '').strip()
+        self.default_radio = str(self.config.get('default_radio') or '').strip() or DEFAULT_RADIO
+        self.radio_stations = (_station_list(self.config.get('radio_stations'))
+                               or list(DEFAULT_RADIO_STATIONS))
         self.volume_step = _clamp(self.config.get('volume_step'), 5, 1, 25)
         self.volume_max = _clamp(self.config.get('volume_max'), 60, 0, 100)
         self.timeout = _clamp(self.config.get('timeout'), 5, 1, 60)
@@ -88,6 +151,7 @@ class SonosHandler(CommandHandler):
         # Rebuild lazily-created clients so new settings take effect.
         self._speaker = None
         self._spotify = None
+        self._tunein = None
 
     @property
     def speaker(self) -> SonosSpeaker:
@@ -103,11 +167,19 @@ class SonosHandler(CommandHandler):
                                                  timeout=float(self.timeout) * 2)
         return self._spotify
 
+    @property
+    def tunein(self) -> TuneInClient:
+        if self._tunein is None:
+            self._tunein = self.tunein_factory(timeout=float(self.timeout) * 2)
+        return self._tunein
+
     # --- introspection ----------------------------------------------------------------
 
     def status(self) -> dict:
         return {'enabled': self.enabled, 'speaker_ip': self.speaker_ip or None,
                 'default_favorite': self.default_favorite or None,
+                'default_radio': self.default_radio,
+                'radio_stations': self.radio_stations,
                 'spotify_configured': bool(self.spotify_id and self.spotify_secret)}
 
     def test(self) -> dict:
@@ -121,7 +193,9 @@ class SonosHandler(CommandHandler):
             return HandlerResult.skipped('sonos handler is disabled')
         try:
             return self._handle(request)
-        except (SonosError, SpotifyError) as exc:
+        except (SonosError, SpotifyError, TuneInError) as exc:
+            LOG.exception('sonos_tool_error session=%s tool=%s',
+                          request.session or '-', request.tool)
             return HandlerResult.failed(str(exc))
 
     def _handle(self, request) -> HandlerResult:
@@ -138,11 +212,14 @@ class SonosHandler(CommandHandler):
                 return self._play_default(source_label='Spotify')
             return self._play_default()
         if intent == 'play_radio':
-            station = request.entities.get('station')
-            if not station:
-                return HandlerResult.skipped('no station recognised')
-            title = self.speaker.play_favorite(station)
-            return HandlerResult.handled(f'Włączam {title}', favorite=title)
+            station = str(request.entities.get('station') or '').strip()
+            if is_generic_radio(station):  # "włącz radio" sent as station="radio"
+                return self._play_station(self.default_radio)
+            return self._play_station(station)
+        if intent == 'play_default_radio':
+            return self._play_station(self.default_radio)
+        if intent == 'play_random_radio':
+            return self._play_random_radio()
         if intent == 'stop':
             self.speaker.stop()
             return HandlerResult.handled('Zatrzymane')
@@ -198,6 +275,39 @@ class SonosHandler(CommandHandler):
             return self.spotify.search_genre_playlist(genre)
         return self.spotify.search_best(query, preferred=preferred)
 
+    def _play_station(self, name: str) -> HandlerResult:
+        """Sonos favorite (exact, then radio substring) first, then TuneIn search."""
+        favorite = self.speaker.find_favorite(name, radio_only_fuzzy=True)
+        if favorite is not None:
+            self.speaker.play_favorite_item(favorite)
+            return HandlerResult.handled(f"Włączam {favorite['title']}",
+                                         station=favorite['title'], source='favorite')
+        station = self.tunein.find_station(name)
+        self.speaker.play_tunein(station['id'], station['title'])
+        return HandlerResult.handled(f"Włączam {station['title']}", station=station['title'],
+                                     station_id=station['id'], source='tunein')
+
+    def _play_random_radio(self) -> HandlerResult:
+        """Random pick from configured stations plus radio favorites, not the current one."""
+        pool = list(self.radio_stations)
+        try:
+            pool += [favorite['title'] for favorite in self.speaker.radio_favorites()]
+        except SonosError:
+            LOG.warning('sonos_radio_favorites_unavailable', exc_info=True)
+        pool = _station_list(pool)
+        playing = compact(self.speaker.current_channel())
+        if playing and len(pool) > 1:
+            pool = [name for name in pool if compact(name) != playing] or pool
+        random.shuffle(pool)
+        errors = []
+        for name in pool[:RANDOM_RADIO_ATTEMPTS]:
+            try:
+                return self._play_station(name)
+            except TuneInError as exc:
+                LOG.warning('sonos_random_radio_skip station=%r error=%s', name, exc)
+                errors.append(str(exc))
+        return HandlerResult.failed('no random station could be played: ' + '; '.join(errors))
+
     def _play_default(self, source_label: str = '') -> HandlerResult:
         """Bare music command: play the configured personal Sonos favorite."""
         if self.default_favorite:
@@ -209,7 +319,7 @@ class SonosHandler(CommandHandler):
     def _volume(self, intent: str, request) -> HandlerResult:
         current = self.speaker.get_volume()
         if intent == 'volume_set':
-            level = (request.entities.get('level') or '').strip()
+            level = str(request.entities.get('level') if request.entities.get('level') is not None else '').strip()
             try:
                 target = max(0, min(self.volume_max, int(level)))
             except ValueError:

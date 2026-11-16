@@ -60,8 +60,8 @@ The push destination is `params.image` in each `pipelinerun.yaml`; bump the
 tag there for a new release. The pushed digest is the run result
 `IMAGE_DIGEST`; pin it (with the tag) in `<component>/deploy/kustomization.yaml`.
 Reference runs of the currently pinned images:
-`open-lexa-receiver-build-sltwg`, `open-lexa-whisper-api-build-2w7wj`,
-`open-lexa-admin-build-ngwsh` (source revision `162d4ca`).
+`open-lexa-receiver-build-jx9lg`, `open-lexa-admin-build-s99jv` (source revision
+`f0b1ff5`, tags `f0b1ff5-llm1`) and `open-lexa-whisper-api-build-2w7wj` (`162d4ca`).
 
 The build requires:
 

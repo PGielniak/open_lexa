@@ -44,19 +44,47 @@ def test_phonetic_normalisation_merges_sound_alike_spellings():
     assert compact('ze spotify') == compact('zespotify')
 
 
-def test_migration_and_seed_are_idempotent(conn):
-    db.migrate(conn)
-    db.seed(conn)
-    conn.execute("UPDATE intents SET description = 'edited' WHERE name = 'stop'")
-    db.seed(conn)
-    assert conn.execute('PRAGMA user_version').fetchone()[0] == len(db.MIGRATIONS)
-    assert conn.execute("SELECT description FROM intents WHERE name = 'stop'").fetchone()[0] == 'edited'
-    assert conn.execute("SELECT count(*) FROM intents WHERE name = 'play_spotify'").fetchone()[0] == 1
-    tree = {i['name']: (i['parent'], i['depth']) for i in db.intents(conn)}
-    assert tree['play_spotify'] == ('play_music', 1)
-    assert db.intent_entity_map(conn)['play_spotify'] == ['search_query']
-    # Names used by the current receiver rules stay meaningful as predicted_intent.
-    assert {'lights_on', 'lights_off', 'play_radio', 'volume_up', 'volume_down'} <= set(tree)
+def test_migration_preserves_legacy_tables(tmp_path):
+    path = tmp_path / 'old.sqlite3'
+    old = db.connect(path)
+    old.execute('CREATE TABLE intents (id INTEGER PRIMARY KEY, name TEXT)')
+    old.execute("INSERT INTO intents VALUES (1, 'historical')")
+    old.commit()
+    old.close()
+    new = db.open_db(path)
+    assert new.execute('SELECT name FROM intents').fetchone()[0] == 'historical'
+    new.close()
+    db.open_db(path).close()
+
+
+def test_old_recordings_migrate_without_losing_annotations(tmp_path):
+    path = tmp_path / 'old.sqlite3'
+    old = db.connect(path)
+    old.executescript('''
+        CREATE TABLE intents (id INTEGER PRIMARY KEY, name TEXT);
+        INSERT INTO intents VALUES (1, 'play_music');
+        CREATE TABLE recordings (
+          id INTEGER PRIMARY KEY, stem TEXT NOT NULL UNIQUE, audio_path TEXT NOT NULL,
+          recorded_at TEXT NOT NULL, duration_seconds REAL, session TEXT, stt_backend TEXT,
+          stt_model TEXT, language TEXT, original_transcript TEXT, stt_error TEXT,
+          predicted_intent TEXT, predicted_entities TEXT, predicted_score REAL,
+          predicted_source TEXT, corrected_transcript TEXT, intent_id INTEGER REFERENCES intents(id),
+          status TEXT NOT NULL DEFAULT 'new', labeled_at TEXT, notes TEXT, ingested_at TEXT NOT NULL,
+          origin TEXT, transcripts TEXT, corrected_source TEXT, annotation TEXT
+        );
+        INSERT INTO recordings (id, stem, audio_path, recorded_at, original_transcript,
+                                corrected_transcript, intent_id, status, ingested_at, annotation)
+        VALUES (1, 'old', '2026-11-02/old.wav', '2026-11-02', 'stary', 'poprawiony', 1,
+                'labeled', '2026-11-02', '{"source":"llm","reviewed_at":"2026-11-02"}');
+        PRAGMA user_version=4;
+    ''')
+    old.close()
+    conn = db.open_db(path)
+    assert conn.execute('SELECT intent_id FROM recordings').fetchone()[0] == 1
+    assert db.export_dataset(conn)[0]['corrected_transcript'] == 'poprawiony'
+    assert db.annotation_of(db.get_recording(conn, 1))['reviewed_at'] == '2026-11-02'
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == 5
+    conn.close()
 
 
 def test_ingest_adds_complete_pairs_once(conn, tmp_path):
@@ -114,8 +142,9 @@ def test_export_keeps_both_transcripts_in_the_dataset(conn, tmp_path):
         corrected_text='Włącz światło.', corrected_source='cloud')
     db.ingest(conn, DirStore(tmp_path))
     rid = db.list_recordings(conn)[0]['id']
-    db.save_label(conn, rid, corrected_transcript='Włącz światło.', intent='lights_on', entities=[])
-    _, dataset = db.export(conn)
+    conn.execute("UPDATE recordings SET status='labeled', corrected_transcript=? WHERE id=?",
+                 ('Włącz światło.', rid))
+    dataset = db.export_dataset(conn)
 
     assert dataset[0]['local_transcript'] == 'włącz światło'
     assert dataset[0]['cloud_transcript'] == 'Włącz światło.'
@@ -140,58 +169,6 @@ def test_detail_shows_both_transcripts_and_prefills_the_gpt_one(tmp_path):
     assert 'włącz światło' in page and 'Włącz światło.' in page
     assert 'auto „poprawna”' in page
     assert '<textarea id="corrected" name="corrected_transcript">Włącz światło.</textarea>' in page
-
-
-def test_save_label_spans_learned_synonyms_and_warnings(conn, tmp_path):
-    put_recording(tmp_path, '1-0000000a', 'Plej dram end bejs on spotyfaj')
-    db.ingest(conn, DirStore(tmp_path))
-    rid = db.list_recordings(conn)[0]['id']
-
-    assert db.suggest_fragment('Plej dram end bejs on spotyfaj', 'drum and bass') == 'dram end bejs'
-    warnings = db.save_label(conn, rid, corrected_transcript='Play drum and bass on spotify', intent='play_spotify',
-                             entities=[{'type': 'search_query', 'value': 'drum and bass',
-                                        'original_fragment': 'dram end bejs'},
-                                       {'type': 'search_query', 'value': 'Pendulum', 'original_fragment': ''}])
-    assert warnings and 'Pendulum' in warnings[0]
-    entities = db.recording_entities(conn, rid)
-    assert (entities[0]['value'], entities[0]['span_start'], entities[0]['span_end']) == ('drum and bass', 5, 18)
-    assert entities[1]['span_start'] is None
-    synonyms = {v['value']: [(s['synonym'], s['source']) for s in v['synonyms']] for v in db.dictionary(conn)}
-    assert synonyms['drum and bass'] == [('dram end bejs', 'learned')]
-    assert synonyms['Pendulum'] == []
-
-    # Correcting the fragment replaces the learned synonym instead of piling up wrong ones.
-    db.save_label(conn, rid, corrected_transcript='Play drum and bass on spotify', intent='play_spotify',
-                  entities=[{'type': 'search_query', 'value': 'Drum and Bass', 'original_fragment': 'dram end bejs on'}])
-    synonyms = {v['value']: [s['synonym'] for s in v['synonyms']] for v in db.dictionary(conn)}
-    assert synonyms['drum and bass'] == ['dram end bejs on']
-    assert db.get_recording(conn, rid)['status'] == 'labeled'
-
-    with pytest.raises(ValueError):
-        db.save_label(conn, rid, corrected_transcript='x', intent=None, entities=[])
-
-
-def test_export_contains_examples_dictionary_and_dataset(conn, tmp_path):
-    put_recording(tmp_path, '1-0000000a', 'Wąc muzyk, rozpotify')
-    put_recording(tmp_path, '2-0000000b', 'To')
-    db.ingest(conn, DirStore(tmp_path))
-    ids = {r['stem']: r['id'] for r in db.list_recordings(conn)}
-    db.save_label(conn, ids['1-0000000a'], corrected_transcript='Włącz muzykę ze Spotify', intent='play_spotify',
-                  entities=[])
-    db.save_label(conn, ids['2-0000000b'], corrected_transcript='', intent='noise', entities=[])
-
-    lexicon, dataset = db.export(conn)
-    examples = {e['text']: e for e in lexicon['examples']}
-    assert examples['Wąc muzyk, rozpotify']['intent'] == 'play_spotify'
-    assert examples['Wąc muzyk, rozpotify']['phonetic'] == 'wac muzyk rozpotify'
-    intents = {i['name']: i for i in lexicon['intents']}
-    assert intents['play_spotify']['parent'] == 'play_music'
-    assert intents['noise']['actionable'] is False
-    assert 'puść {search_query} na spotify' in intents['play_spotify']['phrases']
-    assert 'erem ef' in lexicon['entities']['station']['values']['RMF24']
-    assert [row['intent'] for row in dataset] == ['play_spotify', 'noise']
-    assert dataset[0]['parent_intent'] == 'play_music'
-    assert dataset[0]['audio_path'] == '2026-11-02/1-0000000a.wav'
 
 
 @pytest.fixture
@@ -231,33 +208,30 @@ def test_audio_supports_range_requests(client):
 def test_labeling_flow_exports_to_archive(client):
     test_client, app, archive = client
     detail = test_client.get('/recordings/1', headers=AUTH)
-    assert detail.status_code == 200 and 'play_spotify' in detail.text
-    assert test_client.get('/recordings/1/suggest?value=drum and bass', headers=AUTH).json() == {
-        'fragment': 'dram end bejs'}
+    assert detail.status_code == 200 and 'Poprawna transkrypcja' in detail.text
+    assert test_client.get('/recordings/1/suggest', headers=AUTH).status_code == 404
     response = test_client.post('/recordings/1', headers=AUTH, follow_redirects=False, data={
-        'corrected_transcript': 'Play drum and bass on spotify', 'intent': 'play_spotify', 'action': 'save',
-        'entity_type': ['search_query'], 'entity_value': ['drum and bass'], 'entity_fragment': ['dram end bejs']})
+        'corrected_transcript': 'Play drum and bass on spotify', 'action': 'save'})
     assert response.status_code == 303 and 'saved=1' in response.headers['location']
     app.state.worker.export()
-    lexicon = json.loads((archive / '_lexicon' / 'lexicon.json').read_text())
-    assert lexicon['examples'][0]['entities'][0]['value'] == 'drum and bass'
-    rows = (archive / '_dataset' / 'labels.jsonl').read_text().splitlines()
+    assert not (archive / '_lexicon' / 'lexicon.json').exists()
+    rows = (archive / '_dataset' / 'transcripts.jsonl').read_text().splitlines()
     assert json.loads(rows[0])['corrected_transcript'] == 'Play drum and bass on spotify'
-    assert 'dram end bejs' in test_client.get('/dictionary', headers=AUTH).text
+    assert test_client.get('/dictionary', headers=AUTH).status_code == 404
 
 
-def test_dictionary_edits(client):
-    test_client, _, _ = client
-    post = lambda **data: test_client.post('/dictionary', headers=AUTH, data=data, follow_redirects=False)
-    assert post(action='add_value', entity_type='search_query', value='Pendulum', synonyms='pendalam, pendulam'
-                ).status_code == 303
-    assert post(action='add_intent', name='play podcast', parent='play_music', description='Podcast',
-                entity_types='search_query').status_code == 303
-    assert post(action='add_phrase', intent='play_podcast', phrase='puść podcast {search_query}').status_code == 303
-    page = test_client.get('/dictionary', headers=AUTH).text
-    assert 'pendalam' in page and 'play_podcast' in page and 'puść podcast {search_query}' in page
-    assert post(action='bogus').status_code == 400
-    assert post(action='add_intent', name='stop').status_code == 409
+def test_export_preserves_old_dataset_and_lexicon(client):
+    _, app, archive = client
+    dataset = archive / '_dataset' / 'labels.jsonl'
+    lexicon = archive / '_lexicon' / 'lexicon.json'
+    dataset.parent.mkdir(parents=True, exist_ok=True)
+    lexicon.parent.mkdir(parents=True, exist_ok=True)
+    dataset.write_text('old dataset\n')
+    lexicon.write_text('{"old": true}')
+    app.state.worker.export()
+    assert dataset.read_text() == 'old dataset\n'
+    assert lexicon.read_text() == '{"old": true}'
+    assert (dataset.parent / 'transcripts.jsonl').exists()
 
 
 class FakeSmb:
@@ -333,7 +307,7 @@ def test_failed_export_is_retried(tmp_path):
         worker.stop()
     assert worker.last_export is not None
     assert worker.last_error is None
-    assert (tmp_path / 'archive' / '_lexicon' / 'lexicon.json').exists()
+    assert (tmp_path / 'archive' / '_dataset' / 'transcripts.jsonl').exists()
 
 
 def test_settings_round_trip_keeps_the_api_key_out_of_html(client):
@@ -494,7 +468,7 @@ def test_upload_is_archived_transcribed_and_opened_for_labeling(recorder):
     sidecars = sorted(archive.glob('*/*.json'))
     assert len(sidecars) == 2 and all(p.with_suffix('.wav').exists() for p in sidecars)
     meta = json.loads(sidecars[-1].read_text())
-    assert meta['origin'] == 'browser' and meta['command'] == 'lights_on' and meta['duration_seconds'] == 1.0
+    assert meta['origin'] == 'browser' and 'command' not in meta and meta['duration_seconds'] == 1.0
     assert test_client.get(result['url'] + '/audio', headers=AUTH).content == wav_bytes(bytes(32000))
 
     factory.text = RuntimeError('whisper down')

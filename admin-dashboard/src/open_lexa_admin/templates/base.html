@@ -67,11 +67,10 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; font-size: 1
   <nav>
     <a href="/recordings?status=new">Do oznaczenia</a>
     <a href="/recordings">Wszystkie</a>
-    <a href="/dictionary">Słownik</a>
     <a href="/record">Nagraj</a>
     <a href="/settings">Ustawienia</a>
   </nav>
-  <form method="post" action="/sync"><button title="Pobierz nowe nagrania z SMB i wyeksportuj lexicon">Synchronizuj</button></form>
+  <form method="post" action="/sync"><button title="Pobierz nowe nagrania z SMB">Synchronizuj</button></form>
 </header>
 <main>
 {% if worker.last_error %}<div class="notice warn">Błąd zadania w tle: {{ worker.last_error }}</div>{% endif %}

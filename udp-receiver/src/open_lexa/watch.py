@@ -1,7 +1,6 @@
 """Poll a JSON configuration file on the archive store.
 
-Used for the lexicon (``_lexicon/lexicon.json``) and the handler
-configuration (``_config/handlers.json``). Polling runs on its own thread
+Used for LLM and MCP server configuration. Polling runs on its own thread
 because an SMB read can stall; consumers only compare :attr:`version` between
 recordings and re-read :attr:`data`. A file that fails to parse keeps the last
 good value, exactly like the STT settings watcher.

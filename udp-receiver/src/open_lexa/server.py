@@ -13,23 +13,23 @@ import signal
 import socket
 import threading
 import time
-from typing import Callable
+from opentelemetry import context as otel_context, trace
 
 from dotenv import load_dotenv
 
 from .store import create_store
 from .archive import Archive, create_archive
 from .audio import wav_bytes
-from .commands import Decision, decide
 from .handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH, Dispatcher, validate_config
 from .llm import MODES as LLM_MODES, LLMConfigError, create_llm, create_llm_from_file
 from .llm import SETTINGS_PATH as LLM_SETTINGS_PATH
-from .nlu import LEXICON_PATH, NLU
 from .protocol import CHUNK, HEADER, RATE, Receiver, Recording, parse_token
 from .settings import SettingsWatcher
 from .stt import (BACKENDS, ConfigError, Transcriber, create_transcriber, format_errors,
                   preferred_result, transcribe_all, transcripts_meta)
 from .watch import JsonWatcher
+from .telemetry import tracer, configure as configure_telemetry, TraceLogFilter
+from .tool_agent import process as process_tools
 
 LOG = logging.getLogger('open_lexa')
 
@@ -167,16 +167,37 @@ def reload_transcriber(settings: SettingsWatcher, current: Transcriber | None,
     return replacement, language
 
 
+def start_utterance(recording: Recording) -> tuple[trace.Span, int]:
+    now_mono, now_ns = time.monotonic(), time.time_ns()
+    start_ns = (now_ns - int(max(0, now_mono - recording.receive_started) * 1e9)
+                if recording.receive_started is not None else now_ns)
+    received_ns = (now_ns - int(max(0, now_mono - recording.received_at) * 1e9)
+                   if recording.received_at is not None else now_ns)
+    span = tracer.start_span('utterance', start_time=start_ns,
+                             attributes={'open_lexa.session': f'{recording.session:08x}'})
+    with trace.use_span(span, end_on_exit=False):
+        if recording.receive_started is not None and recording.received_at is not None:
+            receive_span = tracer.start_span('receive_audio', start_time=start_ns)
+            with trace.use_span(receive_span, end_on_exit=False):
+                LOG.info('Received %.2f s from %s (session %08x)',
+                         len(recording.pcm) / (RATE * 2), recording.peer[0], recording.session)
+            receive_span.end(end_time=received_ns)
+            span.set_attribute('open_lexa.receive.duration_ms',
+                               (recording.received_at - recording.receive_started) * 1000)
+        else:
+            LOG.info('Received %.2f s from %s (session %08x)',
+                     len(recording.pcm) / (RATE * 2), recording.peer[0], recording.session)
+    return span, received_ns
+
+
 def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
            save_dir: Path | None, state: HealthState, *,
-           handle: Callable[[str | None], Decision] = decide, archive: Archive | None = None,
-           settings: SettingsWatcher | None = None, nlu: NLU | None = None,
-           lexicon: JsonWatcher | None = None, dispatcher: Dispatcher | None = None,
+           archive: Archive | None = None, settings: SettingsWatcher | None = None,
+           llm_client=None, dispatcher: Dispatcher | None = None,
            handlers_config: JsonWatcher | None = None,
            llm_config: JsonWatcher | None = None) -> None:
     writer = ArchiveWriter(archive, state) if archive is not None else None
     applied = 0  # settings.version the current transcriber was built from; 0 = environment
-    applied_lexicon = 0
     applied_handlers = 0
     applied_llm = 0  # llm_config.version the current LLM client was built from; 0 = environment
     override: str | None = None
@@ -190,10 +211,29 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
             LOG.exception('STT backend initialization failed')
 
     while True:
-        recording = jobs.get()
+        item = jobs.get()
+        span = None
+        token = None
+        processing_started = None
+        processing_status = 'failed'
+        session = '-'
         try:
-            if recording is None:
+            if item is None:
                 break
+            if isinstance(item, tuple):
+                recording, span, received_ns = item
+            else:
+                recording = item
+                span, received_ns = start_utterance(recording)
+            processing_started = time.monotonic()
+            session = f'{recording.session:08x}'
+            now_mono, now_ns = time.monotonic(), time.time_ns()
+            token = otel_context.attach(trace.set_span_in_context(span))
+            if recording.receive_started is not None and recording.received_at is not None:
+                queue_span = tracer.start_span('receiver_queue_wait', start_time=received_ns)
+                queue_span.end(end_time=now_ns)
+                span.set_attribute('open_lexa.queue.duration_ms',
+                                   max(0, now_mono - recording.received_at) * 1000)
             # No peer-controlled path components. ns timestamp prevents overwrites.
             stem = f'{time.time_ns()}-{recording.session:08x}'
             if save_dir is not None:
@@ -204,15 +244,12 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 applied = settings.version
                 if (reloaded := reload_transcriber(settings, transcriber, state)) is not None:
                     transcriber, override = reloaded
-            if nlu is not None and lexicon is not None and lexicon.version != applied_lexicon:
-                applied_lexicon = lexicon.version
-                nlu.update(lexicon.data)
             if dispatcher is not None and handlers_config is not None \
                     and handlers_config.version != applied_handlers:
                 applied_handlers = handlers_config.version
                 dispatcher.apply_config(handlers_config.data)
                 state.handlers = dispatcher.summary()
-            if nlu is not None and llm_config is not None and llm_config.version != applied_llm:
+            if llm_config is not None and llm_config.version != applied_llm:
                 applied_llm = llm_config.version
                 # Same contract as the STT settings file: invalid keeps the
                 # running client, absent falls back to the environment.
@@ -220,26 +257,36 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                     replacement = create_llm_from_file(llm_config.data)
                 except Exception as exc:
                     LOG.warning('New LLM settings rejected (%s); keeping %s', exc,
-                                nlu.llm.model if nlu.llm is not None else 'the current client')
+                                llm_client.model if llm_client is not None else 'the current client')
                 else:
-                    if nlu.llm is not None and nlu.llm is not replacement:
+                    if llm_client is not None and llm_client is not replacement:
                         try:
-                            nlu.llm.close()
+                            llm_client.close()
                         except Exception:
                             LOG.exception('LLM client shutdown failed')
-                    nlu.llm = replacement
-                    nlu.mode = replacement.mode if replacement is not None else 'off'
+                    llm_client = replacement
                     state.llm = replacement.stats if replacement is not None else {}
-                    LOG.info('LLM NLU: %s', f'{replacement.mode} / {replacement.model}'
+                    LOG.info('LLM: %s', f'{replacement.mode} / {replacement.model}'
                              if replacement is not None else 'disabled')
             lang = override or language
             if transcriber is None:
                 print(f'[dry-run] {recording.peer[0]}: {len(recording.pcm) / (RATE * 2):.2f} s, '
                       f'{len(recording.pcm)} bytes PCM', flush=True)
+                processing_status = 'dry_run'
             else:
-                results = transcribe_all(transcriber, recording.pcm, lang)
+                stt_started = time.monotonic()
+                try:
+                    with tracer.start_as_current_span('stt'):
+                        results = transcribe_all(transcriber, recording.pcm, lang)
+                finally:
+                    LOG.info('stt_total session=%s backend=%s duration_ms=%d', session,
+                             transcriber.name, round((time.monotonic() - stt_started) * 1000))
                 chosen = preferred_result(results)
                 for result in results:
+                    LOG.info('stt_backend session=%s role=%s backend=%s model=%s status=%s duration_ms=%s',
+                             session, result.role or '-', result.backend, result.model or '-',
+                             'failed' if result.error else 'ok',
+                             result.latency_ms if result.latency_ms is not None else '-')
                     if result.error:
                         LOG.warning('STT %s failed: %s', result.role or result.backend, result.error)
                 if chosen is None:
@@ -255,22 +302,24 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 state.last_error = None
                 if text:
                     print(text, flush=True)
+                    LOG.info('transcript session=%s backend=%s role=%s text=%s', session,
+                             chosen.backend, chosen.role or '-', json.dumps(text, ensure_ascii=False))
                 else:
                     LOG.info('STT returned an empty transcript')
-                decision = handle(text)
-                execution = None
-                if dispatcher is not None and decision.intent:
-                    # A failing handler never affects recognition or archiving.
-                    execution = dispatcher.dispatch(decision, text=text, stem=stem,
-                                                    session=f'{recording.session:08x}')
+                agent_started = time.monotonic()
+                try:
+                    with tracer.start_as_current_span('llm'):
+                        agent_meta = process_tools(text, llm_client, dispatcher,
+                                                   session=session, stem=stem)
+                finally:
+                    LOG.info('agent_total session=%s duration_ms=%d', session,
+                             round((time.monotonic() - agent_started) * 1000))
+                executions = agent_meta.get('executions', [])
+                execution = executions[0] if executions else None
+                LOG.info('Recording processed (session %08x)', recording.session)
+                processing_status = agent_meta['status']
                 if writer is not None:
-                    nlu_meta = ({'intent': decision.intent} if decision.intent else {})
-                    if decision.entities:
-                        nlu_meta['entities'] = decision.entities_dict
-                    if decision.score is not None:
-                        nlu_meta['score'] = decision.score
-                    if decision.source is not None:
-                        nlu_meta['source'] = decision.source
+                    nlu_meta = {'agent': agent_meta}
                     if execution is not None:
                         nlu_meta['execution'] = execution
                     writer.submit(stem, recording, text=text, language=lang,
@@ -279,13 +328,22 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                                   corrected_text=text,
                                   corrected_source=chosen.role or transcriber.name,
                                   transcripts=transcripts_meta(results),
-                                  command=decision.command, reply=decision.reply, **nlu_meta)
+                                  reply=agent_meta.get('reply'), **nlu_meta)
         except Exception as exc:
             # One failed request must not kill the receiver or stop the next recording.
             state.failures += 1
             state.last_error = str(exc)
+            if span is not None:
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
             LOG.exception('Recording processing failed (session %08x)', recording.session)
         finally:
+            if processing_started is not None:
+                LOG.info('processing_total session=%s status=%s duration_ms=%d', session,
+                         processing_status, round((time.monotonic() - processing_started) * 1000))
+            if token is not None:
+                otel_context.detach(token)
+            if span is not None:
+                span.end()
             jobs.task_done()
 
     if transcriber is not None:
@@ -293,9 +351,9 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
             transcriber.close()
         except Exception:
             LOG.exception('STT backend shutdown failed')
-    if nlu is not None and getattr(nlu, 'llm', None) is not None:
+    if llm_client is not None:
         try:
-            nlu.llm.close()
+            llm_client.close()
         except Exception:
             LOG.exception('LLM client shutdown failed')
     if writer is not None:
@@ -323,11 +381,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--settings-seconds', type=float,
                         help='Poll the admin STT/handler settings on SMB every N s, 0 disables '
                              '(default: OPEN_LEXA_SETTINGS_SECONDS or 30)')
-    parser.add_argument('--lexicon-seconds', type=float,
-                        help='Poll the NLU lexicon on SMB every N s, 0 disables '
-                             '(default: OPEN_LEXA_LEXICON_SECONDS or 60)')
     parser.add_argument('--llm-mode', choices=LLM_MODES,
-                        help='LLM intent/entity recognition after transcription (default: '
+                         help='LLM tool calling after transcription (default: '
                              'LLM_INTENT_MODE; always when LLM_API_KEY and LLM_MODEL are set)')
     parser.add_argument('--dry-run', action='store_true', help='Receive audio without initialising an STT backend')
     return parser
@@ -337,7 +392,11 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     load_dotenv(args.env_file)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(levelname)s trace_id=%(trace_id)s span_id=%(span_id)s %(message)s')
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(TraceLogFilter())
+    telemetry_provider = configure_telemetry()
     # smbprotocol logs every SMB message at INFO; keep only its warnings/errors.
     logging.getLogger('smbprotocol').setLevel(logging.WARNING)
     logging.getLogger('spnego').setLevel(logging.WARNING)
@@ -387,30 +446,16 @@ def main():
             settings_seconds = float(os.environ.get('OPEN_LEXA_SETTINGS_SECONDS', '30'))
         except ValueError:
             parser.error('OPEN_LEXA_SETTINGS_SECONDS must be a number')
-    lexicon_seconds = args.lexicon_seconds
-    if lexicon_seconds is None:
-        try:
-            lexicon_seconds = float(os.environ.get('OPEN_LEXA_LEXICON_SECONDS', '60'))
-        except ValueError:
-            parser.error('OPEN_LEXA_LEXICON_SECONDS must be a number')
-    # NLU lexicon and handler plugins ride the same archive as the recordings;
-    # without it the receiver keeps the built-in regex rules and logs commands.
-    # The optional LLM cascade needs no archive: without a lexicon it offers
-    # the regex-rule command names to the model instead.
     llm_client = None
     if not args.dry_run:
         try:
             llm_client = create_llm(mode=args.llm_mode)
         except LLMConfigError as exc:
             parser.error(str(exc))
-    nlu = lexicon = dispatcher = handlers_config = None
-    if archive is not None or llm_client is not None:
-        nlu = NLU(llm=llm_client, mode=llm_client.mode if llm_client is not None else 'off')
-    if archive is not None:
+    dispatcher = handlers_config = None
+    if not args.dry_run:
         dispatcher = Dispatcher()
-        if lexicon_seconds > 0:
-            lexicon = JsonWatcher(create_store(), LEXICON_PATH, interval=lexicon_seconds)
-        if settings_seconds > 0:
+        if archive is not None and settings_seconds > 0:
             handlers_config = JsonWatcher(create_store(), HANDLERS_CONFIG_PATH,
                                           interval=settings_seconds, validate=validate_config)
     if archive is not None and settings_seconds > 0 and not args.backend and not args.model:
@@ -426,7 +471,7 @@ def main():
                         handlers=dispatcher.summary() if dispatcher is not None else {})
     if llm_client is not None:
         state.llm = llm_client.stats  # shared dict: /healthz sees live counters
-        LOG.info('LLM NLU enabled: mode=%s model=%s url=%s', llm_client.mode,
+        LOG.info('LLM enabled: mode=%s model=%s url=%s', llm_client.mode,
                  llm_client.model, llm_client.settings['url'])
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -435,14 +480,16 @@ def main():
     receiver = Receiver(token)
 
     def deliver(recording: Recording) -> bool:
+        if jobs.full():
+            return False
+        span, received_ns = start_utterance(recording)
         try:
-            jobs.put_nowait(recording)
+            jobs.put_nowait((recording, span, received_ns))
         except queue.Full:
+            span.end()
             return False
         state.received += 1
         state.last_recording = time.time()
-        LOG.info('Received %.2f s from %s (session %08x)',
-                 len(recording.pcm) / (RATE * 2), recording.peer[0], recording.session)
         return True
 
     def stop(_signum, _frame):
@@ -459,16 +506,13 @@ def main():
         thread = threading.Thread(
             target=worker, args=(jobs, transcriber, language, save_dir, state),
             kwargs={'archive': archive, 'settings': settings,
-                    'handle': nlu.decide if nlu is not None else decide,
-                    'nlu': nlu, 'lexicon': lexicon,
+                    'llm_client': llm_client,
                     'dispatcher': dispatcher, 'handlers_config': handlers_config,
                     'llm_config': llm_config},
             daemon=True, name='stt')
         thread.start()
         if settings is not None:
             settings.start()
-        if lexicon is not None:
-            lexicon.start()
         if handlers_config is not None:
             handlers_config.start()
         if llm_config is not None:
@@ -506,8 +550,6 @@ def main():
             thread.join(timeout=20)
             if settings is not None:
                 settings.stop()
-            if lexicon is not None:
-                lexicon.stop()
             if handlers_config is not None:
                 handlers_config.stop()
             if llm_config is not None:
@@ -515,6 +557,8 @@ def main():
             if httpd is not None:
                 httpd.shutdown()
                 httpd.server_close()
+            if telemetry_provider is not None:
+                telemetry_provider.shutdown()
 
 
 if __name__ == '__main__':

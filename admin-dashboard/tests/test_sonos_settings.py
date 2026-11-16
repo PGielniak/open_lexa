@@ -41,6 +41,7 @@ def test_sonos_config_and_authenticated_controls(tmp_path, monkeypatch):
         assert client.post('/settings/handlers/unknown', headers=AUTH).status_code == 404
         response = client.post('/settings/sonos', headers=AUTH, follow_redirects=False, data={
             'enabled': '1', 'speaker_ip': '192.168.1.22', 'default_favorite': 'Chill',
+            'default_radio': 'RMF FM', 'radio_stations': 'RMF FM, Radio 357',
             'volume_step': '5', 'volume_max': '40', 'spotify_client_id': 'client',
             'spotify_client_secret': 'top-secret', 'spotify_market': 'PL'})
         assert response.status_code == 303
@@ -56,13 +57,17 @@ def test_sonos_config_and_authenticated_controls(tmp_path, monkeypatch):
         app.state.worker.export()
         published = json.loads((archive / '_config' / 'handlers.json').read_text())
         assert published['sonos']['speaker_ip'] == '192.168.1.22'
+        assert published['sonos']['default_radio'] == 'RMF FM'
+        assert published['sonos']['radio_stations'] == 'RMF FM, Radio 357'
         assert published['sonos']['spotify']['client_secret'] == 'top-secret'
         client.post('/settings/sonos', headers=AUTH, data={
             'enabled': '1', 'speaker_ip': '192.168.1.22',
-            'default_favorite': '', 'spotify_client_id': ''})
+            'default_favorite': '', 'default_radio': '', 'spotify_client_id': ''})
         conn = db.connect(app.state.worker.db_path)
         changed = db.get_setting(conn, 'handlers')['sonos']
         assert changed['default_favorite'] == ''
+        assert changed['default_radio'] == ''
+        assert changed['radio_stations'] == 'RMF FM, Radio 357'
         assert changed['spotify']['client_id'] == ''
         assert changed['spotify']['client_secret'] == 'top-secret'
         conn.close()

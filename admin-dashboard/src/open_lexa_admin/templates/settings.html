@@ -9,7 +9,7 @@
 
 <form method="post" class="panel" id="settings-form">
   <h2 style="margin-top:0">Rozpoznawanie mowy (STT)</h2>
-  <p class="muted" style="margin-top:0">Tryb <strong>dual</strong> wysyła każde nagranie równolegle do lokalnego Whispera i do chmury. Transkrypcja GPT jest automatycznie zapisywana jako „poprawna”, więc w panelu wystarczy dodać intencję i encje. Tryby pojedyncze są tylko awaryjne (offline / brak klucza).</p>
+  <p class="muted" style="margin-top:0">Tryb <strong>dual</strong> wysyła każde nagranie równolegle do lokalnego Whispera i do chmury. Transkrypcję GPT można sprawdzić i poprawić w panelu.</p>
   <div>
     <label class="inline"><input type="radio" name="mode" value="dual"{% if s.mode == 'dual' %} checked{% endif %}> lokalny Whisper + GPT transcribe (zalecane)</label>
     <label class="inline"><input type="radio" name="mode" value="local"{% if s.mode == 'local' %} checked{% endif %}> tylko lokalny Whisper</label>
@@ -24,8 +24,7 @@
       <div><label for="local_model">Model Whispera na Hailo</label>
         <input type="text" id="local_model" name="local_model" value="{{ s.local_model }}" list="local-models">
         <datalist id="local-models">
-          <option value="whisper-base">Base — lepszy dla polskiego, szybszy</option>
-          <option value="whisper-small">Small — dokładniejszy dla trudnego audio</option>
+          <option value="whisper-medium">Medium — najdokładniejszy, wolniejszy (HailoRT 5.5.0)</option>
           <option value="whisper-1">domyślny model API</option>
         </datalist>
         <p class="muted" style="font-size:12px;margin:4px 0 0">Przełączenie ładuje wybrany HEF na Hailo przy następnym nagraniu (bez restartu usługi).</p></div>
@@ -58,8 +57,8 @@
 </form>
 
 <form method="post" action="/settings/llm" class="panel" style="margin-top:16px" id="llm-form">
-  <h2 style="margin-top:0">LLM — oznaczanie nagrań i rozpoznawanie w odbiorniku</h2>
-  <p class="muted" style="margin-top:0">Osobny klucz API do modelu językowego (OpenAI-compatible). LLM przypisuje intencję i encje do nowych nagrań — tworzy brakujące pozycje słownika. Etykiety pozostają edytowalne; każde oznaczenie dostaje adnotację „LLM”.</p>
+  <h2 style="margin-top:0">LLM — wybór narzędzi MCP</h2>
+  <p class="muted" style="margin-top:0">Model OpenAI-compatible z obsługą tool calling otrzymuje transkrypcję oraz opisy dostępnych narzędzi MCP.</p>
   <div class="row">
     <div style="flex-basis:320px"><label for="llm_url">Bazowy URL (Chat Completions)</label>
       <input type="url" id="llm_url" name="url" value="{{ llm.url }}"></div>
@@ -72,17 +71,13 @@
     {% if llm_key_hint %}<div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="clear_llm_api_key" value="1"> usuń klucz</label></div>{% endif %}
   </div>
   <div class="row" style="margin-top:10px">
-    <div style="flex:0 1 120px"><label for="llm_batch">Partia (ile nagrań na cykl)</label>
-      <input type="text" id="llm_batch" name="batch_size" value="{{ llm.batch_size }}"></div>
     <div style="flex:0 1 120px"><label for="llm_timeout">Timeout [s]</label>
       <input type="text" id="llm_timeout" name="timeout" value="{{ llm.timeout }}"></div>
-    <div style="flex:0 0 auto"><label class="inline"><input type="checkbox" name="auto_label" value="1"{% if llm.auto_label %} checked{% endif %}> oznaczaj nowe nagrania automatycznie</label></div>
   </div>
   <div class="row" style="margin-top:10px">
     <div style="flex:0 0 auto">
       <label class="inline"><input type="radio" name="receiver_mode" value="off"{% if llm.receiver_mode == 'off' %} checked{% endif %}> w odbiorniku wyłączony</label>
-      <label class="inline"><input type="radio" name="receiver_mode" value="fallback"{% if llm.receiver_mode == 'fallback' %} checked{% endif %}> fallback — odbiornik pyta LLM, gdy słownik nic nie rozpozna</label>
-      <label class="inline"><input type="radio" name="receiver_mode" value="always"{% if llm.receiver_mode == 'always' %} checked{% endif %}> always — LLM rozstrzyga każde nagranie po transkrypcji</label>
+      <label class="inline"><input type="radio" name="receiver_mode" value="always"{% if llm.receiver_mode in ('always', 'fallback') %} checked{% endif %}> LLM dla każdej transkrypcji</label>
     </div>
   </div>
   <p class="muted" style="font-size:13px; margin-bottom:0">Ustawienia LLM trafiają do <span class="mono">_config/llm.json</span> na udziale SMB (klucz API tylko przy włączonym trybie odbiornika), skąd czyta je odbiornik — ten sam klucz, bez drugiego wpisania w <span class="mono">.env</span>. <span class="mono">--llm-mode</span> odbiornika ma pierwszeństwo nad plikiem.</p>
@@ -95,7 +90,7 @@
 
 <form method="post" action="/settings/sonos" class="panel" style="margin-top:16px" id="sonos-form">
   <h2 style="margin-top:0">Sonos / Spotify — handler poleceń</h2>
-  <p class="muted" style="margin-top:0">Konfiguracja trafia do <span class="mono">_config/handlers.json</span> na udziale SMB; odbiornik wykonuje nią intencje muzyczne i głośności przez SoCo. Wyszukiwanie „puść &lt;coś&gt; na Spotify” wymaga konta Spotify podpiętego w aplikacji Sonos oraz credentials aplikacji ze <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> (Client Credentials; wystarczy darmowe konto).</p>
+  <p class="muted" style="margin-top:0">Konfiguracja trafia do <span class="mono">_config/handlers.json</span> na udziale SMB; narzędzia muzyczne sterują Sonos przez SoCo. Wyszukiwanie Spotify wymaga konta podpiętego w Sonos oraz danych aplikacji ze <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>.</p>
   <div>
     <label class="inline"><input type="checkbox" name="enabled" value="1"{% if sonos.enabled %} checked{% endif %}> włącz handler Sonos</label>
   </div>
@@ -106,6 +101,12 @@
         <input type="text" id="speaker_ip" name="speaker_ip" value="{{ sonos.speaker_ip }}" placeholder="192.168.1.42"></div>
       <div><label for="default_favorite">Moja domyślna playlista (nazwa w Ulubionych Sonos)</label>
         <input type="text" id="default_favorite" name="default_favorite" value="{{ sonos.default_favorite }}" placeholder="np. nazwa playlisty Spotify w Ulubionych"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex-basis:220px"><label for="default_radio">Domyślne radio („włącz radio”)</label>
+        <input type="text" id="default_radio" name="default_radio" value="{{ sonos.default_radio }}" placeholder="Radio Zet"></div>
+      <div><label for="radio_stations">Stacje do losowania („włącz losowe radio”), po przecinku</label>
+        <input type="text" id="radio_stations" name="radio_stations" value="{{ sonos.radio_stations }}" placeholder="Radio Zet, RMF FM, Radio 357, Radio Nowy Świat, Antyradio, TOK FM"></div>
     </div>
     <div class="row" style="margin-top:10px">
       <div style="flex:0 1 120px"><label for="volume_step">Krok głośności</label>
@@ -161,9 +162,9 @@
 
 <div class="panel" style="margin-top:16px">
   <h2 style="margin-top:0">Zainstalowane handlery poleceń</h2>
-  <p class="muted" style="margin-top:0">Handlery to wtyczki odbiornika (<span class="mono">open_lexa/handlers/&lt;folder&gt;</span>): każdy dostaje rozpoznaną intencję i encje. Włączenie i parametry — w sekcji wyżej; odbiornik czyta <span class="mono">_config/handlers.json</span> co ~30 s.</p>
+  <p class="muted" style="margin-top:0">Lokalne serwery MCP udostępniają narzędzia modelowi. Zmiany są publikowane przez SMB.</p>
   <table>
-    <thead><tr><th>ID</th><th>Wersja</th><th>Intencje</th><th>Włączony</th></tr></thead>
+    <thead><tr><th>ID</th><th>Wersja</th><th>Narzędzia</th><th>Włączony</th></tr></thead>
     <tbody>
     {% for p in plugins %}
     <tr><td class="mono">{{ p.id }}</td><td>{{ p.version }}</td>
@@ -176,6 +177,26 @@
     {% endfor %}
     </tbody>
   </table>
+</div>
+
+<div class="panel" style="margin-top:16px">
+  <h2>Zewnętrzne serwery MCP (Streamable HTTP)</h2>
+  <p class="muted">Podłączaj tylko zaufane serwery: ich narzędzia mogą wykonywać działania. URL musi być dostępny z odbiornika; klucz trafia na udział SMB.</p>
+  {% for server in mcp_servers %}
+  <form method="post" action="/settings/mcp" class="row">
+    <input type="hidden" name="server_id" value="{{ server.id }}">
+    <div><strong>{{ server.id }}</strong><input type="url" name="url" value="{{ server.url }}" required></div>
+    <div><input type="password" name="api_key" placeholder="{{ 'klucz zapisany — bez zmian' if server.has_key else 'opcjonalny token Bearer' }}"></div>
+    <label class="inline"><input type="checkbox" name="enabled" value="1"{% if server.enabled %} checked{% endif %}> włączony</label>
+    <button>Zapisz</button><button name="delete" value="1" formnovalidate>Usuń</button>
+  </form>
+  {% endfor %}
+  <form method="post" action="/settings/mcp" class="row" style="margin-top:12px">
+    <div><label>ID</label><input type="text" name="server_id" required></div>
+    <div><label>URL MCP</label><input type="url" name="url" required></div>
+    <div><label>Token Bearer (opcjonalny)</label><input type="password" name="api_key"></div>
+    <label class="inline"><input type="checkbox" name="enabled" value="1"> włączony</label><button>Dodaj</button>
+  </form>
 </div>
 
 <script>

@@ -7,7 +7,6 @@ import wave
 import pytest
 
 from open_lexa.archive import SmbArchive, create_archive
-from open_lexa.commands import DEFAULT_REPLY, decide, normalize
 from open_lexa.protocol import Recording
 from open_lexa.server import HealthState, worker
 from open_lexa.stt import ConfigError, DualTranscriber
@@ -81,34 +80,10 @@ def run_worker(transcriber, **kwargs):
     return state
 
 
-def test_normalize_drops_punctuation_and_case():
-    assert normalize('  Włącz, ŚWIATŁO!  ') == 'włącz światło'
-
-
-@pytest.mark.parametrize('text, command', [
-    ('Włącz światło.', 'lights_on'),
-    ('Wyłącz światło w kuchni', 'lights_off'),
-    ('Puść radio', 'play_radio'),
-    ('Ciszej!', 'volume_down'),
-])
-def test_decide_matches_rules(text, command):
-    assert decide(text).command == command
-
-
-@pytest.mark.parametrize('text', ['Jaka jest pogoda?', '', None])
-def test_decide_defaults_to_sorry(text):
-    decision = decide(text)
-    assert decision.command is None
-    assert decision.reply == DEFAULT_REPLY == 'sorry ale nie rozumiem'
-
-
 def test_worker_decides_and_archives_wav_with_transcript():
-    handled = []
     archive = MemoryArchive()
-    state = run_worker(FakeTranscriber(['Włącz światło.', '']),
-                       handle=lambda text: handled.append(text) or decide(text), archive=archive)
+    state = run_worker(FakeTranscriber(['Włącz światło.', '']), archive=archive)
 
-    assert handled == ['Włącz światło.', '']
     assert state.archived == 2 and state.failures == 0
     assert archive.closed
     stem, wav, meta = archive.saved[0]
@@ -116,18 +91,15 @@ def test_worker_decides_and_archives_wav_with_transcript():
     with wave.open(io.BytesIO(wav), 'rb') as source:
         assert source.readframes(source.getnframes()) == bytes(6400)
     assert meta['text'] == 'Włącz światło.'
-    assert meta['command'] == 'lights_on'
+    assert meta['agent']['status'] == 'unavailable'
     assert meta['language'] == 'pl' and meta['backend'] == 'fake'
     assert meta['duration_seconds'] == 0.2
-    assert archive.saved[1][2]['reply'] == DEFAULT_REPLY
+    assert archive.saved[1][2]['agent']['status'] == 'empty'
 
 
 def test_archive_failure_does_not_block_command_or_count_as_failure():
-    handled = []
     state = run_worker(FakeTranscriber(['Głośniej']),
-                       handle=lambda text: handled.append(text) or decide(text),
                        archive=MemoryArchive(fail=True))
-    assert handled == ['Głośniej']
     assert state.failures == 0 and state.transcribed == 1
     assert state.archive_failures == 1
 
@@ -195,19 +167,17 @@ def test_stalled_archive_does_not_block_commands():
         def save(self, stem, wav, meta):
             release.wait(5)
 
-    handled = []
     transcriber = FakeTranscriber(['Głośniej'] * 20)
     state = HealthState(transcriber.name)
     jobs = queue.Queue()
     thread = threading.Thread(target=worker, args=(jobs, transcriber, 'pl', None, state),
-                              kwargs={'handle': lambda text: handled.append(text) or decide(text),
-                                      'archive': StalledArchive()}, daemon=True)
+                              kwargs={'archive': StalledArchive()}, daemon=True)
     thread.start()
     for session in range(20):
         jobs.put(Recording(('127.0.0.1', 1234), session, bytes(64)))
     jobs.join()
 
-    assert len(handled) == 20
+    assert state.transcribed == 20
     assert state.archive_failures >= 3  # queue of 16 + one in flight
     release.set()
     jobs.put(None)
@@ -248,7 +218,7 @@ def test_worker_archives_both_transcripts_and_uses_gpt_for_the_command():
     assert not thread.is_alive()
     assert state.transcribed == 1 and state.failures == 0
     meta = archive.saved[0][2]
-    assert meta['text'] == 'Włącz światło.' and meta['command'] == 'lights_on'
+    assert meta['text'] == 'Włącz światło.' and meta['agent']['status'] == 'unavailable'
     assert meta['corrected_text'] == 'Włącz światło.' and meta['corrected_source'] == 'cloud'
     assert meta['backend'] == 'dual' and meta['model'] == 'gpt-transcribe'
     assert meta['transcripts']['local']['text'] == 'Włącz światło lokalnie'

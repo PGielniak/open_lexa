@@ -2,68 +2,11 @@
 import json
 from pathlib import Path
 
-from open_lexa.commands import Decision
+from types import SimpleNamespace
 from open_lexa.handlers import Dispatcher, discover, validate_config
 from open_lexa.handlers.base import CommandHandler, HandlerResult
-from open_lexa.nlu import NLU
 from open_lexa.store import DirStore
 from open_lexa.watch import JsonWatcher
-
-
-def test_nlu_routes_sonos_intents_and_preserves_entity_values():
-    from open_lexa_admin import db
-    conn = db.open_db(':memory:')
-    try:
-        lexicon, _ = db.export(conn)
-    finally:
-        conn.close()
-    nlu = NLU()
-    nlu.update(lexicon)
-    assert nlu.decide('Włącz spotify').intent == 'play_spotify'
-    decision = nlu.decide('Puść Chill na spotify')
-    assert decision.intent == 'play_spotify'
-    assert decision.entities_dict['search_query'] == 'chill'
-    decision = nlu.decide('Ustaw głośność na dwadzieścia pięć')
-    assert decision.entities_dict['level'] == '25'
-    assert nlu.decide('Pauza').intent == 'pause'
-
-
-def test_nlu_recognises_sonos_playback_queue_and_volume_commands():
-    from open_lexa_admin import db
-    conn = db.open_db(':memory:')
-    try:
-        lexicon, _ = db.export(conn)
-    finally:
-        conn.close()
-    nlu = NLU()
-    nlu.update(lexicon)
-    cases = {
-        'Puść moją playlistę': ('play_music', {}),
-        'Włącz muzykę ze Spotify': ('play_spotify', {}),
-        'Puść muzykę artysty Pendulum': ('play_spotify', {'search_query': 'pendulum'}),
-        'Puść muzykę gatunku synthwave': ('play_spotify', {'search_query': 'synthwave'}),
-        'Puść utwór Bohemian Rhapsody na Spotify':
-            ('play_spotify', {'search_query': 'bohemian rhapsody'}),
-        'Dodaj utwór Bohemian Rhapsody do kolejki':
-            ('queue_spotify', {'search_query': 'bohemian rhapsody'}),
-        'Dodaj do kolejki Drum and Bass':
-            ('queue_spotify', {'search_query': 'drum and bass'}),
-        'Dodaj artystę Pendulum do kolejki':
-            ('queue_spotify', {'search_query': 'pendulum'}),
-        'Dodaj playlistę Drum and Bass do kolejki':
-            ('queue_spotify', {'search_query': 'drum and bass'}),
-        'Podgłośnij o pięć': ('volume_up', {'level': '5'}),
-        'Przycisz o 10': ('volume_down', {'level': '10'}),
-        'Ustaw głośność na 20 procent': ('volume_set', {'level': '20'}),
-        'Następna piosenka': ('next_track', {}),
-        'Następne.': ('next_track', {}),
-        'Kolejne.': ('next_track', {}),
-        'Poprzednia piosenka': ('previous_track', {}),
-        'Poprzednie.': ('previous_track', {}),
-    }
-    for text, (intent, entities) in cases.items():
-        decision = nlu.decide(text)
-        assert (decision.intent, decision.entities_dict) == (intent, entities), text
 
 
 class Good(CommandHandler):
@@ -82,6 +25,11 @@ class Bad(CommandHandler):
         raise RuntimeError('device is offline')
 
 
+def Decision(command, reply, *, intent, entities=()):
+    return SimpleNamespace(command=command, reply=reply, intent=intent,
+                           entities=entities, entities_dict=dict(entities))
+
+
 def test_dispatcher_plugs_enables_and_isolates_failures():
     dispatcher = Dispatcher([Good(), Bad()])
     decision = Decision('play_spotify', 'play_spotify', intent='play_spotify',
@@ -96,6 +44,56 @@ def test_dispatcher_plugs_enables_and_isolates_failures():
     assert dispatcher.dispatch(Decision('stop', 'stop', intent='stop')) is None
     assert 'sonos' in {handler.id for handler in discover()}
     assert Dispatcher().summary()['sonos']['enabled'] is False
+
+
+def test_sonos_error_includes_traceback_and_result_reason(caplog):
+    import logging
+    from open_lexa.handlers.sonos.handler import SonosHandler
+    from open_lexa.handlers.sonos.sonos import SonosError
+
+    class Speaker:
+        def __init__(self, ip, timeout):
+            pass
+
+        def play_favorite(self, name):
+            try:
+                raise ValueError('UPnP Error 800')
+            except ValueError as exc:
+                raise SonosError('playing favorite failed') from exc
+
+    handler = SonosHandler()
+    handler.speaker_factory = Speaker
+    dispatcher = Dispatcher([handler])
+    dispatcher.apply_config({'sonos': {'enabled': True, 'speaker_ip': '192.168.1.2',
+                                       'default_favorite': 'test'}})
+    caplog.set_level(logging.INFO)
+    result = dispatcher.dispatch(Decision('play_spotify', '', intent='play_spotify'), session='abc123')
+    assert result['status'] == 'failed' and result['error'] == 'playing favorite failed'
+    record = next(r for r in caplog.records if 'sonos_tool_error' in r.message)
+    assert record.exc_info is not None
+    assert 'ValueError: UPnP Error 800' in caplog.text
+    assert 'SonosError: playing favorite failed' in caplog.text
+    assert 'mcp_result session=abc123 server=sonos tool=play_spotify status=failed' in caplog.text
+    assert 'error="playing favorite failed"' in caplog.text
+
+
+def test_skipped_result_logs_reason_without_traceback(caplog):
+    import logging
+
+    class Skipped(CommandHandler):
+        id = 'skipped'
+        intents = frozenset({'play'})
+
+        def handle(self, request):
+            return HandlerResult.skipped('no default favorite configured')
+
+    dispatcher = Dispatcher([Skipped()])
+    dispatcher.apply_config({'skipped': {'enabled': True}})
+    caplog.set_level(logging.INFO)
+    dispatcher.dispatch(Decision('play', '', intent='play'), session='abc')
+    record = next(r for r in caplog.records if 'mcp_result' in r.message)
+    assert record.exc_info is None
+    assert 'status=skipped' in record.message and 'no default favorite configured' in record.message
 
 
 def test_invalid_json_watcher_keeps_previous_configuration(tmp_path: Path):
@@ -376,3 +374,125 @@ def test_sonos_queue_does_not_interrupt_and_playback_uses_coordinator(monkeypatc
     speaker.play_spotify('spotify:track:song', 'Song')
     assert calls[-2:] == [('enqueue', coordinator, 'spotify:track:song', 'Song'),
                           ('play_from_queue', 3)]
+
+
+def _radio_handler(favorites=(), channel='', stations=None):
+    from open_lexa.handlers.sonos.handler import SonosHandler
+    from open_lexa.handlers.sonos.sonos import SonosSpeaker
+    from open_lexa.handlers.sonos.tunein import TuneInClient
+
+    calls = []
+
+    class Speaker(SonosSpeaker):
+        def favorites(self):
+            return [dict(item) for item in favorites]
+
+        def play_favorite_item(self, favorite):
+            calls.append(('favorite', favorite['title']))
+
+        def play_tunein(self, station_id, title):
+            calls.append(('tunein', station_id, title))
+
+        def current_channel(self):
+            return channel
+
+    class TuneIn(TuneInClient):
+        def search(self, query):
+            calls.append(('search', query))
+            return [item for item in (stations or {}).get(query, [])]
+
+    handler = SonosHandler()
+    handler.speaker_factory = Speaker
+    handler.tunein_factory = TuneIn
+    handler.configure({'enabled': True, 'speaker_ip': '192.168.0.2',
+                       'radio_stations': 'RMF FM, Radio 357\nrmf fm'})
+    return handler, calls
+
+
+def test_radio_tools_are_listed():
+    from open_lexa.handlers.sonos.handler import SonosHandler
+
+    names = {tool.name for tool in SonosHandler.tools}
+    assert {'play_radio', 'play_default_radio', 'play_random_radio'} <= names
+
+
+def test_default_and_named_radio_use_tunein():
+    from open_lexa.handlers.base import CommandRequest
+
+    handler, calls = _radio_handler(stations={
+        'Radio Zet': [{'id': 's125091', 'title': 'ZET Hits!'},
+                      {'id': 's15990', 'title': 'Radio Zet'}],
+        'RMF FM': [{'id': 's1217', 'title': 'RMF FM'}],
+    })
+    assert handler.radio_stations == ['RMF FM', 'Radio 357']
+    result = handler.handle(CommandRequest('play_default_radio'))
+    assert result.status == 'handled' and result.response == 'Włączam Radio Zet'
+    assert handler.handle(CommandRequest('play_radio', {'station': 'RMF FM'})).status == 'handled'
+    assert handler.handle(CommandRequest('play_radio', {'station': 'Radio'})).status == 'handled'
+    assert [call for call in calls if call[0] == 'tunein'] == [
+        ('tunein', 's15990', 'Radio Zet'), ('tunein', 's1217', 'RMF FM'),
+        ('tunein', 's15990', 'Radio Zet')]
+
+
+def test_named_radio_prefers_favorites_and_rejects_unrelated_matches():
+    from open_lexa.handlers.base import CommandRequest
+
+    favorites = [{'title': 'Chill', 'uri': 'x-rincon-cpcontainer:abc', 'meta': ''},
+                 {'title': 'Trójka Polskie Radio', 'uri': 'x-rincon-mp3radio:http://x', 'meta': ''}]
+    handler, calls = _radio_handler(favorites=favorites, stations={
+        'Jazz': [{'id': 's1', 'title': 'Dark Edge Radio'}]})
+    assert handler.handle(CommandRequest('play_radio', {'station': 'Trójka'})).status == 'handled'
+    assert calls == [('favorite', 'Trójka Polskie Radio')]
+    # A playlist favorite is not a fuzzy radio match; TuneIn's loose hit is refused.
+    result = handler.handle(CommandRequest('play_radio', {'station': 'Jazz'}))
+    assert result.status == 'failed' and 'no TuneIn station matches' in result.error
+
+
+def test_random_radio_skips_current_and_unknown_stations(monkeypatch):
+    from open_lexa.handlers.base import CommandRequest
+
+    favorites = [{'title': 'Chillizet', 'uri': 'x-sonosapi-stream:s87828?sid=254', 'meta': ''},
+                 {'title': 'Chill', 'uri': 'x-rincon-cpcontainer:abc', 'meta': ''}]
+    handler, calls = _radio_handler(favorites=favorites, channel='Radio 357', stations={
+        'RMF FM': []})
+    monkeypatch.setattr('open_lexa.handlers.sonos.handler.random.shuffle',
+                        lambda items: items.sort(key=lambda name: name != 'RMF FM'))
+    result = handler.handle(CommandRequest('play_random_radio'))
+    assert result.status == 'handled' and result.detail['station'] == 'Chillizet'
+    assert ('search', 'Radio 357') not in calls
+    assert calls[-1] == ('favorite', 'Chillizet')
+
+
+def test_tunein_matching_and_play_uri(monkeypatch):
+    from open_lexa.handlers.sonos.sonos import SonosSpeaker
+    from open_lexa.handlers.sonos.tunein import TuneInClient, TuneInError
+
+    client = TuneInClient()
+    monkeypatch.setattr(client, 'search', lambda query: [
+        {'id': 's1', 'title': 'Dark Edge Radio'}, {'id': 's9608', 'title': 'Anty Radio'},
+        {'id': 's174766', 'title': 'Radio Nowy Świat'}])
+    assert client.find_station('Antyradio')['id'] == 's9608'
+    assert client.find_station('radio nowy swiat')['id'] == 's174766'
+    try:
+        client.find_station('Trójka')
+    except TuneInError as exc:
+        assert 'Dark Edge Radio' in str(exc)
+    else:
+        raise AssertionError('loose match accepted')
+
+    played = []
+
+    class Coordinator:
+        def play_uri(self, uri, meta='', **kwargs):
+            played.append((uri, meta, kwargs))
+
+    speaker = SonosSpeaker('192.168.0.2')
+    monkeypatch.setattr(SonosSpeaker, 'coordinator', property(lambda self: Coordinator()))
+    speaker.play_tunein('s15990', 'Radio <Zet>')
+    speaker.play_favorite_item({'uri': 'x-sonosapi-stream:s1', 'meta': '<DIDL/>'})
+    speaker.play_favorite_item({'uri': 'x-rincon-cpcontainer:abc', 'meta': '<DIDL/>'})
+    assert played[0][0] == 'x-sonosapi-stream:s15990?sid=254&flags=8224&sn=0'
+    assert 'F00092020s15990' in played[0][1] and 'Radio &lt;Zet&gt;' in played[0][1]
+    assert played[0][2] == {'timeout': 20.0}
+    assert played[1] == ('x-sonosapi-stream:s1', '<DIDL/>', {'timeout': 20.0})
+    assert played[2] == ('x-rincon-cpcontainer:abc', '<DIDL/>', {})

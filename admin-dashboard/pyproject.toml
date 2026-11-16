@@ -5,15 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "open-lexa-admin"
 version = "0.1.0"
-description = "Open Lexa admin dashboard: labeling, STT settings and browser recording"
+description = "Open Lexa admin dashboard: transcript review, settings and browser recording"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    # Shares the archive store, STT settings, commands and audio helpers.
+    # Shares the archive store, STT settings and audio helpers.
     "open-lexa",
     "fastapi>=0.115,<1",
     "jinja2>=3.1,<4",
     "python-multipart>=0.0.9",
-    "rapidfuzz>=3.9,<4",
     "uvicorn>=0.30,<1",
 ]
 

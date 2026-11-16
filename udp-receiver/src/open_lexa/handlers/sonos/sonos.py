@@ -8,8 +8,30 @@ requires for play/queue operations.
 from __future__ import annotations
 
 import logging
+import re
+from xml.sax.saxutils import escape
 
 LOG = logging.getLogger('open_lexa.handlers.sonos')
+
+
+# Sonos favorites with these URIs are radio stations (TuneIn, plain streams).
+RADIO_URI_PREFIXES = ('x-sonosapi-stream:', 'x-rincon-mp3radio:', 'x-sonosapi-radio:',
+                      'aac:', 'hls-radio:')
+TUNEIN_SID = 254
+# Play blocks until a radio stream has buffered, often longer than the 5 s
+# request timeout used for other commands.
+STREAM_START_TIMEOUT = 20.0
+TUNEIN_DESC = 'SA_RINCON65031_'
+TUNEIN_DIDL = (
+    '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
+    'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+    'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" '
+    'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+    '<item id="F00092020{id}" parentID="L" restricted="true">'
+    '<dc:title>{title}</dc:title>'
+    '<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>'
+    '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">{desc}</desc>'
+    '</item></DIDL-Lite>')
 
 
 class SonosError(RuntimeError):
@@ -114,32 +136,82 @@ class SonosSpeaker:
                  'meta': item.get('meta') or ''}
                 for item in (result or {}).get('favorites', []) if item.get('uri')]
 
+    @staticmethod
+    def is_radio(favorite: dict) -> bool:
+        uri = favorite.get('uri') or ''
+        return (uri.startswith(RADIO_URI_PREFIXES)
+                or 'audioItem.audioBroadcast' in (favorite.get('meta') or ''))
+
+    def radio_favorites(self) -> list[dict]:
+        return [favorite for favorite in self.favorites() if self.is_radio(favorite)]
+
+    def find_favorite(self, name: str, *, radio_only_fuzzy: bool = False) -> dict | None:
+        """Exact title match first, then a substring match (optionally radio only)."""
+        favorites = self.favorites()
+        needle = (name or '').casefold().strip()
+        if not needle:
+            return None
+        for favorite in favorites:
+            if favorite['title'].casefold().strip() == needle:
+                return favorite
+        for favorite in favorites:
+            if radio_only_fuzzy and not self.is_radio(favorite):
+                continue
+            title = favorite['title'].casefold()
+            if needle in title or title in needle:
+                return favorite
+        return None
+
     def play_favorite(self, name: str | None = None) -> str:
         """Play a Sonos favorite by (fuzzy) title; None plays the first one."""
-        favorites = self.favorites()
-        if not favorites:
-            raise SonosError('the Sonos household has no favorites')
-        chosen = None
         if name:
-            needle = name.casefold().strip()
-            for favorite in favorites:
-                if favorite['title'].casefold().strip() == needle:
-                    chosen = favorite
-                    break
+            chosen = self.find_favorite(name)
             if chosen is None:
-                for favorite in favorites:
-                    title = favorite['title'].casefold()
-                    if needle in title or title in needle:
-                        chosen = favorite
-                        break
-            if chosen is None:
+                favorites = self.favorites()
+                if not favorites:
+                    raise SonosError('the Sonos household has no favorites')
                 raise SonosError(f'favorite {name!r} not found; available: '
                                  + ', '.join(f['title'] for f in favorites[:20]))
         else:
+            favorites = self.favorites()
+            if not favorites:
+                raise SonosError('the Sonos household has no favorites')
             chosen = favorites[0]
-        self._call('playing the favorite',
-                   lambda: self.coordinator.play_uri(chosen['uri'], meta_data=chosen['meta']))
+        self.play_favorite_item(chosen)
         return chosen['title']
+
+    def play_favorite_item(self, favorite: dict) -> None:
+        timeout = self._start_timeout() if self.is_radio(favorite) else None
+        extra = {'timeout': timeout} if timeout else {}
+        self._call('playing the favorite',
+                   lambda: self.coordinator.play_uri(favorite['uri'], meta=favorite['meta'],
+                                                     **extra))
+
+    def _start_timeout(self) -> float:
+        return max(float(self.timeout), STREAM_START_TIMEOUT)
+
+    def play_tunein(self, station_id: str, title: str) -> None:
+        """Play a TuneIn station by guide id (``s15990``).
+
+        The classic TuneIn service id is accepted by current Sonos firmware
+        and is redirected onto the household's linked TuneIn account.
+        """
+        if not re.fullmatch(r's\d+', station_id or ''):
+            raise SonosError(f'invalid TuneIn station id {station_id!r}')
+        uri = f'x-sonosapi-stream:{station_id}?sid={TUNEIN_SID}&flags=8224&sn=0'
+        meta = TUNEIN_DIDL.format(id=station_id, title=escape(title or station_id),
+                                  desc=TUNEIN_DESC)
+        self._call(f'playing TuneIn station {station_id}',
+                   lambda: self.coordinator.play_uri(uri, meta=meta,
+                                                     timeout=self._start_timeout()))
+
+    def current_channel(self) -> str:
+        """Name of the playing radio station, '' for queue playback or on error."""
+        try:
+            info = self.coordinator.get_current_media_info() or {}
+        except Exception:
+            return ''
+        return str(info.get('channel') or '')
 
     def play_spotify(self, uri: str, title: str = '') -> None:
         """Queue and play a spotify:track/album/playlist URI through ShareLink."""

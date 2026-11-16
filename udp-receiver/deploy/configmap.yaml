@@ -16,7 +16,7 @@ data:
   # Use STT_BACKEND=http (local only) if OPENAI_API_KEY is not configured.
   STT_BACKEND: "dual"
   STT_HTTP_URL: "http://open-lexa-whisper:8080/v1"
-  STT_HTTP_MODEL: "whisper-base"
+  STT_HTTP_MODEL: "whisper-medium"
   # STT_HTTP_API_KEY belongs in open-lexa-secrets, never here.
   STT_LANGUAGE: "pl"
   # Cloud endpoint for dual/openai (OPENAI_API_KEY in open-lexa-secrets).
@@ -30,14 +30,14 @@ data:
   SMB_SHARE: "open-lexa"
   SMB_PATH: ""
   SMB_TIMEOUT: "10"
-  # Optional LLM intent/entity recognition after transcription. With SMB the
+  # LLM tool calling after transcription. With SMB the
   # admin publishes its Ustawienia → LLM settings (including the key, only
   # when the receiver mode is on) to _config/llm.json and this file takes
   # precedence; use LLM_* only without an archive. LLM_API_KEY belongs in
   # open-lexa-secrets, never here. Modes: always (LLM decides every
-  # transcript, default when key+model are set), fallback (only when the
-  # lexicon/rules recognise nothing), off.
-  # LLM_INTENT_MODE: "fallback"
+  # transcript, default when key+model are set), off. Legacy fallback is
+  # treated as always by the tool-calling pipeline; no regex fallback runs.
+  # LLM_INTENT_MODE: "always"
   # LLM_MODEL: "gpt-4o-mini"
   # LLM_URL: "https://api.openai.com/v1"
   # LLM_TIMEOUT: "15"
