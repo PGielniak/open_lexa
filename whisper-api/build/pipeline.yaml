@@ -108,7 +108,8 @@ spec:
                 memory: 1Gi
               limits:
                 cpu: "3"
-                memory: 4Gi
+                # Three baked HEFs (~1.9 GB, Medium 1.4 GB alone) exceed 4Gi.
+                memory: 6Gi
             command: ['/kaniko/executor']
             args:
               - '--dockerfile=$(workspaces.build.path)/whisper-api/build/Dockerfile'
@@ -117,6 +118,7 @@ spec:
               - '--digest-file=$(results.IMAGE_DIGEST.path)'
               # The build pod is ARM64; redo snapshots are reliable on the Pi nodes.
               - '--snapshot-mode=redo'
+              - '--compressed-caching=false'
               - '--verbosity=info'
             volumeMounts:
               - name: docker-config

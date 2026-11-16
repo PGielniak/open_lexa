@@ -23,6 +23,9 @@ spec:
       # HailoRT and the baked HEF are ARM64.
       nodeSelector:
         kubernetes.io/arch: arm64
+        # ~2 GB of HEFs need disk headroom: raspberry01/02 root fs has ~6-7 GB free
+        # (ephemeral-storage evictions); raspberry03 has ~35 GB.
+        kubernetes.io/hostname: raspberry03
       # Build pods do not need Kubernetes API credentials.
       automountServiceAccountToken: false
   timeouts:
