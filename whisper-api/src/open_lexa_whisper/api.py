@@ -144,6 +144,7 @@ class _Job:
     used_model: str | None = None
     trace_context: Any = None
     queued_at: float = field(default_factory=time.monotonic)
+    started_at: float = 0.0
 
 
 class WhisperAPI:
@@ -225,6 +226,7 @@ class WhisperAPI:
                         return
                     trace_token = otel_context.attach(job.trace_context)
                     try:
+                        job.started_at = time.monotonic()
                         with tracer.start_as_current_span('whisper.inference') as span:
                             span.set_attribute('open_lexa.queue.duration_ms',
                                                (time.monotonic() - job.queued_at) * 1000)
@@ -264,15 +266,25 @@ class WhisperAPI:
             raise APIUnavailableError(str(detail))
         job = _Job(pcm, (language or self.default_language or 'auto').strip() or 'auto',
                    model=self.resolve_model(model), trace_context=otel_context.get_current())
+        started = time.monotonic()
         try:
             self._jobs.put_nowait(job)
         except queue.Full as exc:
+            LOG.warning('Whisper request rejected: queue full model=%s', job.model)
             raise APIUnavailableError('transcription queue is full') from exc
         if not job.done.wait(self.request_timeout):
+            LOG.warning('Whisper request timed out after %.0f ms model=%s pcm_bytes=%d',
+                        (time.monotonic() - started) * 1000, job.model, len(pcm))
             raise APIUnavailableError('transcription timed out', status=504)
         if job.error is not None:
             raise job.error
-        return (job.text or '').strip()
+        text = (job.text or '').strip()
+        LOG.info('Whisper transcription done model=%s language=%s pcm_bytes=%d '
+                 'queue_ms=%.0f total_ms=%.0f chars=%d transcript=%r',
+                 job.used_model or job.model, job.language, len(pcm),
+                 (job.started_at - started) * 1000 if job.started_at else 0,
+                 (time.monotonic() - started) * 1000, len(text), text)
+        return text
 
     def close(self, timeout: float = 20.0) -> None:
         """Drain accepted work, then release the device on its owner thread."""
@@ -457,7 +469,10 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
             self._json(200, {'text': text})
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib signature
-        LOG.debug('%s - %s', self.address_string(), format % args)
+        message = format % args
+        # Probe traffic is noisy; keep real API calls visible in Loki.
+        probe = self.path.startswith(('/healthz', '/readyz')) if hasattr(self, 'path') else False
+        LOG.log(logging.DEBUG if probe else logging.INFO, '%s - %s', self.address_string(), message)
 
 
 class WhisperHTTPServer(ThreadingHTTPServer):
