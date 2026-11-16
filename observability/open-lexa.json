@@ -1,0 +1,74 @@
+{
+  "uid": "open-lexa-overview",
+  "title": "Open Lexa — przegląd",
+  "description": "Stan workloadów, zasoby, logi i trace’y Open Lexa.",
+  "tags": ["open-lexa"],
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "title": "Stan instrumentacji", "type": "text",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+      "options": {"mode": "markdown", "content": "**Tracing jest włączony** dla receivera i Whisper API. Trace obejmuje czas od pierwszego pakietu na receiverze; nie obejmuje nagrywania na ESP32. Metryki czasów etapów i p50/p95 nie są jeszcze zbierane.\n\n[Otwórz Explore: Tempo](/explore?left=%7B%22datasource%22:%22tempo%22%7D)"}
+    },
+    {
+      "id": 2, "title": "Dostępne repliki", "type": "stat",
+      "description": "Dostępne repliki Kubernetes Deployment, nie stan end-to-end polecenia.",
+      "gridPos": {"h": 5, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "kube_deployment_status_replicas_available{namespace=\"open-lexa\"}", "legendFormat": "{{deployment}}", "instant": true}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}, "orientation": "horizontal", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}}
+    },
+    {
+      "id": 3, "title": "Restarty kontenerów (24 h)", "type": "stat",
+      "gridPos": {"h": 5, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=\"open-lexa\"}[24h]))", "legendFormat": "{{pod}}", "instant": true}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "values": false}, "orientation": "horizontal", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "id": 4, "title": "CPU podów", "type": "timeseries",
+      "description": "Zużycie CPU w rdzeniach, średnia z 5 minut.",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"open-lexa\",container!=\"\",container!=\"POD\"}[5m]))", "legendFormat": "{{pod}}"}],
+      "fieldConfig": {"defaults": {"unit": "cores", "min": 0}}
+    },
+    {
+      "id": 5, "title": "Pamięć podów", "type": "timeseries",
+      "description": "Working set kontenerów, nie pamięć całego węzła.",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"open-lexa\",container!=\"\",container!=\"POD\"})", "legendFormat": "{{pod}}"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "min": 0}}
+    },
+    {
+      "id": 6, "title": "CPU throttling", "type": "timeseries",
+      "description": "Procent okresów CFS z throttlingiem; nie procent utraconego czasu CPU.",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=\"open-lexa\",container!=\"\",container!=\"POD\"}[5m])) / clamp_min(sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=\"open-lexa\",container!=\"\",container!=\"POD\"}[5m])), 0.000001)", "legendFormat": "{{pod}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}}
+    },
+    {
+      "id": 7, "title": "Trace’y receivera", "type": "table",
+      "description": "Wybierz trace, aby zobaczyć jego spany w Tempo. Puste wyniki mogą oznaczać brak nowych nagrań.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17},
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "targets": [{"refId": "A", "queryType": "traceql", "tableType": "traces", "query": "{ resource.service.name = \"open-lexa-receiver\" }", "limit": 50}]
+    },
+    {
+      "id": 8, "title": "Logi Open Lexa", "type": "logs",
+      "description": "Logi mogą zawierać transkrypcje i dane wrażliwe. Rekordy w aktywnym spanie zawierają trace_id.",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 25},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "{namespace=\"open-lexa\"}", "queryType": "range"}],
+      "options": {"showTime": true, "showLabels": true, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending"}
+    }
+  ]
+}

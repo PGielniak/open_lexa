@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: open-lexa
+configMapGenerator:
+  - name: open-lexa-grafana-dashboard
+    files:
+      - open-lexa.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"

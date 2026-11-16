@@ -34,6 +34,9 @@ spec:
         - name: receiver
           image: open-lexa
           imagePullPolicy: IfNotPresent
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://alloy.monitoring.svc.cluster.local:4318
           envFrom:
             - configMapRef:
                 name: open-lexa-config
