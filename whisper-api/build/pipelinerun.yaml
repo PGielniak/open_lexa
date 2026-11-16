@@ -35,4 +35,4 @@ spec:
       emptyDir: {}
   params:
     - name: image
-      value: ghcr.io/pgielniak/open-lexa-whisper-hailo:0.2.0-hailort5.4.0-whisper-small
+      value: ghcr.io/pgielniak/open-lexa-whisper-hailo:0.3.0-hailort5.5.0-whisper-multi

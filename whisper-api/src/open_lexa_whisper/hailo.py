@@ -23,6 +23,7 @@ DEFAULT_MODEL_NAME = 'whisper-base'
 WELL_KNOWN_HEFS = {
     'whisper-base': '/models/Whisper-Base.hef',
     'whisper-small': '/models/Whisper-Small.hef',
+    'whisper-medium': '/models/Whisper-Medium.hef',
 }
 
 

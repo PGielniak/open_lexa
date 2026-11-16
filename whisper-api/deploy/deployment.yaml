@@ -33,6 +33,9 @@ spec:
         - name: whisper-api
           image: open-lexa-whisper-hailo
           imagePullPolicy: IfNotPresent
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://alloy.monitoring.svc.cluster.local:4318
           envFrom:
             - configMapRef:
                 name: open-lexa-whisper-config

@@ -10,7 +10,7 @@ from open_lexa_whisper.api import WhisperAPI, create_server
 
 class Models:
     name = 'fake-hailo'
-    models = ('whisper-base', 'whisper-small')
+    models = ('whisper-base', 'whisper-small', 'whisper-medium')
     model = 'whisper-base'
 
     def __init__(self):
@@ -43,6 +43,7 @@ def test_model_switch_and_legacy_alias():
             data = json.load(response)
         assert [item['id'] for item in data['data']] == list(transcriber.models)
         for model, expected in [('whisper-small', 'whisper-small'),
+                                ('whisper-medium', 'whisper-medium'),
                                 ('whisper-base', 'whisper-base'),
                                 ('whisper-1', 'whisper-base')]:
             client = OpenAICompatibleTranscriber(f'{address}/v1', model)

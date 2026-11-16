@@ -23,11 +23,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 import wave
+from opentelemetry import context as otel_context
+from opentelemetry.propagate import extract
 
 from dotenv import load_dotenv
 
 from . import MAX_BYTES, RATE
 from .hailo import ConfigError, create_transcriber
+from .telemetry import tracer, configure as configure_telemetry, TraceLogFilter
 
 LOG = logging.getLogger('open_lexa.whisper_api')
 DEFAULT_MAX_UPLOAD_BYTES = MAX_BYTES + 4096
@@ -139,6 +142,8 @@ class _Job:
     text: str | None = None
     error: Exception | None = None
     used_model: str | None = None
+    trace_context: Any = None
+    queued_at: float = field(default_factory=time.monotonic)
 
 
 class WhisperAPI:
@@ -180,7 +185,7 @@ class WhisperAPI:
             return self.model
         if name in self.models:
             return name
-        aliases = {'whisper-1': self.model, 'base': 'whisper-base', 'small': 'whisper-small',
+        aliases = {'whisper-1': self.model, 'base': 'whisper-base', 'small': 'whisper-small', 'medium': 'whisper-medium',
                    'whisper': self.model}
         resolved = aliases.get(name)
         if resolved in self.models:
@@ -218,12 +223,16 @@ class WhisperAPI:
                 try:
                     if job is None:
                         return
+                    trace_token = otel_context.attach(job.trace_context)
                     try:
-                        if job.model is not None and hasattr(self.transcriber, 'select_model'):
-                            # Runs on the inference thread: HailoRT device work
-                            # must stay on the thread that created the handles.
-                            self.transcriber.select_model(job.model)
-                        job.text = self.transcriber.transcribe(job.pcm, job.language)
+                        with tracer.start_as_current_span('whisper.inference') as span:
+                            span.set_attribute('open_lexa.queue.duration_ms',
+                                               (time.monotonic() - job.queued_at) * 1000)
+                            if job.model is not None and hasattr(self.transcriber, 'select_model'):
+                                with tracer.start_as_current_span('whisper.select_model'):
+                                    self.transcriber.select_model(job.model)
+                            with tracer.start_as_current_span('whisper.transcribe'):
+                                job.text = self.transcriber.transcribe(job.pcm, job.language)
                         job.used_model = getattr(self.transcriber, 'model', None)
                         self.state.record_success(job.used_model)
                     except Exception as exc:
@@ -231,6 +240,7 @@ class WhisperAPI:
                         self.state.record_failure(exc)
                         LOG.exception('Whisper transcription failed')
                     finally:
+                        otel_context.detach(trace_token)
                         job.done.set()
                 finally:
                     self._jobs.task_done()
@@ -253,7 +263,7 @@ class WhisperAPI:
             detail = self.state.snapshot()['last_error'] or 'model is still starting'
             raise APIUnavailableError(str(detail))
         job = _Job(pcm, (language or self.default_language or 'auto').strip() or 'auto',
-                   model=self.resolve_model(model))
+                   model=self.resolve_model(model), trace_context=otel_context.get_current())
         try:
             self._jobs.put_nowait(job)
         except queue.Full as exc:
@@ -413,6 +423,11 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
         self._error(404, 'not found')
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        ctx = extract({key.lower(): value for key, value in self.headers.items()})
+        with tracer.start_as_current_span('whisper.http', context=ctx):
+            self._post()
+
+    def _post(self) -> None:
         if urlsplit(self.path).path != '/v1/audio/transcriptions':
             self._error(404, 'not found')
             return
@@ -491,7 +506,11 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     load_dotenv(args.env_file)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(levelname)s trace_id=%(trace_id)s span_id=%(span_id)s %(message)s')
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(TraceLogFilter())
+    telemetry_provider = configure_telemetry()
 
     bind = args.bind or os.environ.get('WHISPER_API_BIND', '0.0.0.0')
     port = args.port if args.port is not None else _env_int(parser, 'WHISPER_API_PORT', 8080)
@@ -542,6 +561,8 @@ def main() -> None:
     finally:
         server.server_close()
         api.close()
+        if telemetry_provider is not None:
+            telemetry_provider.shutdown()
 
 
 if __name__ == '__main__':
