@@ -11,6 +11,6 @@ images:
   - name: open-lexa-whisper-hailo
     newName: ghcr.io/pgielniak/open-lexa-whisper-hailo
     newTag: 0.3.0-hailort5.5.0-whisper-multi
-    # Built by Tekton PipelineRun open-lexa-whisper-api-build-24gr6.
+    # Built by Tekton PipelineRun open-lexa-whisper-api-build-6pt7j.
     # Pinning the digest keeps rollouts reproducible even if the tag moves.
-    digest: sha256:f68e348042969b4e67ad4147f3c5e5be52c905c51b3db06ae60cbb7420ec3956
+    digest: sha256:92837431bfc2f0de19782794a47d96596f5e673e488ad9d29caa4d9a08e5ab0b

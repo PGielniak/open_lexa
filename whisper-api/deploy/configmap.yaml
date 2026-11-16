@@ -9,11 +9,11 @@ data:
   WHISPER_API_BIND: "0.0.0.0"
   WHISPER_API_PORT: "8080"
   # Model ids are an API contract label, not an OpenAI download. The image
-  # bundles the Base, Small and Medium Hailo HEFs; requests may pick any through the `model`
-  # field, and `whisper-1` stays an alias for the default below.
-  WHISPER_API_MODEL: "whisper-base"
-  WHISPER_API_DEFAULT_MODEL: "whisper-base"
-  WHISPER_API_MODELS: "whisper-base=/models/Whisper-Base.hef,whisper-small=/models/Whisper-Small.hef,whisper-medium=/models/Whisper-Medium.hef"
+  # bundles only the Whisper-Medium Hailo HEF (Base/Small were dropped to save node disk);
+  # `whisper-1` stays an alias for the default below.
+  WHISPER_API_MODEL: "whisper-medium"
+  WHISPER_API_DEFAULT_MODEL: "whisper-medium"
+  WHISPER_API_MODELS: "whisper-medium=/models/Whisper-Medium.hef"
   WHISPER_API_LANGUAGE: "pl"
   WHISPER_API_QUEUE_SIZE: "4"
   WHISPER_API_REQUEST_TIMEOUT_SECONDS: "90"
