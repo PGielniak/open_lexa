@@ -129,27 +129,46 @@ int16_t removeDC(int16_t sample) {
 void command() {
   busy = true;
   requested = false;
+  const uint32_t triggered = millis();
   Serial.println("Alexa / serial trigger -> beep");
-  if (!AudioBoard::beep()) {
+  // Only a cheap reset here: recreating WakeNet (resetAudioHistory) is slow and
+  // every millisecond spent before capture cuts off the start of the command.
+  // The full reset runs after the capture below. Do NOT discard pending input:
+  // it holds the audio right after the wake word.
+  resampler->reset();
+  previous_input = previous_output = 0;
+  if (!AudioBoard::beepStart()) {
     Serial.println("Beep failed; command cancelled.");
     resetAudioHistory(); busy = false; return;
   }
-  resetAudioHistory();
+  // Record from the very start, also while the beep plays. Beep samples are
+  // kept but excluded from speech detection (plus a short echo guard), so the
+  // 250 ms pre-roll in CommandCapture::start() still covers words spoken over it.
   CommandCapture capture(recording, SPEECH_RMS, SILENCE_MS);
-  Serial.println("Listening for command (max 12 s)...");
+  constexpr size_t ECHO_GUARD = 16000 * 30 / 1000;  // 30 ms after the DAC is muted
+  size_t vad_from = CommandCapture::MAX_SAMPLES;
+  bool beeping = true;
+  Serial.printf("Listening for command (max 4 s), started %u ms after wake word...\n",
+                unsigned(millis() - triggered));
   const uint32_t started = millis();
   bool done = false, valid = true;
   int16_t stereo[256 * 2];
-  while (!done && millis() - started < 14000) {
+  while (!done && millis() - started < 6000) {
+    if (beeping) {
+      if (!AudioBoard::beepPump(beeping)) Serial.println("Beep playback failed; still recording.");
+      if (!beeping) vad_from = capture.count() + ECHO_GUARD;
+    }
     size_t frames = 0;
     if (!AudioBoard::read(stereo, 256, frames)) { valid = false; break; }
     for (size_t i = 0; i < frames; ++i) {
       int16_t mono;
-      if (resampler->push(stereo[i * 2], mono) && capture.push(removeDC(mono))) {
+      if (resampler->push(stereo[i * 2], mono) &&
+          capture.push(removeDC(mono), capture.count() >= vad_from)) {
         done = true; break;
       }
     }
   }
+  if (beeping) AudioBoard::muteDac(true);
   if (!valid || !done) Serial.println("Audio read/recording timeout; recording discarded.");
   else if (!capture.hasSpeech()) Serial.println("No speech detected; no API request.");
   else {
@@ -173,7 +192,7 @@ void audioTask(void *) {
      removes DC offset, and fills the 1-frame internal-RAM `wake_frame` buffer.
   4. Runs WakeNet9 inference whenever `wake_frame` is full; if the wake word is
      detected (`detected == true`), invokes command() to beep, capture up to
-     12 s of speech, and upload it over UDP.
+     4 s of speech, and upload it over UDP.
   5. Records remaining task stack headroom (`uxTaskGetStackHighWaterMark`) and
      yields Core 1 for 1 ms (`delay(1)`) so appLoop() and the FreeRTOS idle
      watchdog task can run.

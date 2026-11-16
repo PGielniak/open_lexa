@@ -17,6 +17,9 @@ constexpr int DOUT = 8;  // Nano D5 -> base DIN, speaker
 bool begin(unsigned mic_gain, unsigned volume);
 bool muteDac(bool mute);  // Never disables microphone power.
 bool read(int16_t *stereo, size_t frames, size_t &received);
-bool beep();
+// Non-blocking beep so the microphone keeps recording while it plays:
+// call beepStart() once, then beepPump() between reads until playing == false.
+bool beepStart();
+bool beepPump(bool &playing);
 void discardInput();
 }

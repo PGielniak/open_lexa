@@ -74,36 +74,52 @@ void discardInput() {
   }
 }
 
-bool beep() {
+static constexpr size_t BEEP_LEAD = RATE / 50;        // 20 ms silence: lets the DAC unmute ramp finish
+static constexpr size_t BEEP_TONE = RATE * 8 / 100;   // 80 ms tone
+static constexpr size_t BEEP_TOTAL = BEEP_LEAD + BEEP_TONE;
+static constexpr float BEEP_AMPLITUDE = 28000.0f;     // ~-1.4 dBFS: as loud as possible without clipping
+static size_t beep_pos = 0;
+static uint32_t beep_drain_until = 0;
+static bool beep_active = false;
+
+static int16_t beepSample(size_t t) {
+  if (t < BEEP_LEAD) return 0;
+  const size_t k = t - BEEP_LEAD;
+  const float env = std::min(1.0f, std::min(float(k), float(BEEP_TONE - 1 - k)) / 441.0f);
+  return static_cast<int16_t>(std::sin(2 * 3.141592653589793 * 880 * k / RATE) * BEEP_AMPLITUDE * env);
+}
+
+bool beepStart() {
   diagnostic_stage = 100;
   if (!muteDac(false)) return false;
+  beep_pos = 0;
+  beep_drain_until = 0;
+  beep_active = true;
+  return true;
+}
+
+bool beepPump(bool &playing) {
+  playing = beep_active;
+  if (!beep_active) return true;
   diagnostic_stage = 101;
-  int16_t data[256 * 2];
-  constexpr size_t count = RATE / 10;
-  bool ok = true;
-  for (size_t offset = 0; offset < count && ok; offset += 256) {
-    const size_t n = std::min(size_t(256), count - offset);
-    for (size_t i = 0; i < n; ++i) {
-      const size_t t = offset + i;
-      const float env = std::min(1.0f, std::min(float(t), float(count - 1 - t)) / 441.0f);
-      const int16_t sample = static_cast<int16_t>(std::sin(2 * 3.141592653589793 * 880 * t / RATE) * 2000 * env);
-      data[2*i] = data[2*i+1] = sample;
-    }
-    diagnostic_stage = 102;
+  while (beep_pos < BEEP_TOTAL) {
+    int16_t data[64 * 2];
+    const size_t n = std::min(size_t(64), BEEP_TOTAL - beep_pos);
+    for (size_t i = 0; i < n; ++i) data[2*i] = data[2*i+1] = beepSample(beep_pos + i);
     size_t written = 0;
-    ok = i2s_write(PORT, data, n * 4, &written, pdMS_TO_TICKS(500)) == ESP_OK && written == n * 4;
+    // Timeout 0: only fill free DMA space, never stall the microphone reads.
+    if (i2s_write(PORT, data, n * 4, &written, 0) != ESP_OK) { beep_active = playing = false; muteDac(true); return false; }
+    beep_pos += written / 4;
+    if (written < n * 4) return true;  // DMA full; continue on the next pump.
   }
-  // i2s_write can return with up to 8*256 frames pending in DMA (~47 ms).
+  diagnostic_stage = 102;
+  // Up to 8*256 frames (~47 ms) can still be queued in DMA after the last write.
+  if (!beep_drain_until) beep_drain_until = millis() + 50;
+  if (int32_t(millis() - beep_drain_until) < 0) return true;
   diagnostic_stage = 103;
-  delay(70);
-  diagnostic_stage = 104;
-  const bool muted = muteDac(true);
-  diagnostic_stage = 105;
-  i2s_zero_dma_buffer(PORT);
-  delay(100);  // Let the speaker/ringing settle before capturing a command.
-  diagnostic_stage = 106;
-  discardInput();
-  diagnostic_stage = 107;
-  return ok && muted;
+  beep_active = playing = false;
+  // tx_desc_auto_clear transmits zeros from here; no i2s_zero_dma_buffer, which
+  // would also wipe pending microphone audio.
+  return muteDac(true);
 }
 }

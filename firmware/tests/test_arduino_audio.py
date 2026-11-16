@@ -54,8 +54,10 @@ int main() {
   assert(residual < 12);  // Detects wrong fractional-phase sign/jitter.
   assert(std::sqrt(alias/n) < 20); // More than 50 dB rejection above Nyquist.
   std::vector<int16_t> buffer(CommandCapture::MAX_SAMPLES);
+  assert(CommandCapture::MAX_SAMPLES == 64000);
   CommandCapture silence(buffer.data(),500,1000);
-  for (int i=0;i<64000;++i) assert(silence.push(0) == (i==63999));
+  for (size_t i=0;i<CommandCapture::NO_SPEECH_SAMPLES;++i)
+    assert(silence.push(0) == (i==CommandCapture::NO_SPEECH_SAMPLES-1));
   assert(!silence.hasSpeech());
   CommandCapture speech(buffer.data(),500,1000);
   for(int i=0;i<16000;++i) assert(!speech.push(0));
@@ -63,10 +65,24 @@ int main() {
   for(int i=0;i<16000;++i) assert(speech.push(0) == (i==15999));
   assert(speech.hasSpeech());
   assert(speech.start()==12000 && speech.end()==36800);
+  // Background music / single 20 ms clicks after loud speech must not hold capture open.
+  CommandCapture noisy(buffer.data(),600,700);
+  for(int i=0;i<8000;++i) assert(!noisy.push(i%2?12000:-12000));
+  for(int i=0;i<11200;++i) assert(noisy.push(i%2?1500:-1500) == (i==11199));
+  assert(noisy.hasSpeech() && noisy.count()==19200);
   CommandCapture continuous(buffer.data(),500,1000);
   for(size_t i=0;i<buffer.size();++i) assert(continuous.push(3000) == (i==buffer.size()-1));
   assert(continuous.push(3000)); // Already full: must not overrun.
   assert(continuous.count()==buffer.size());
+  // A loud beep pushed with vad=false is stored but not detected as speech;
+  // speech right after it gets pre-roll reaching back over the beep.
+  CommandCapture beeped(buffer.data(),500,1000);
+  for(int i=0;i<2880;++i) assert(!beeped.push(i%2?28000:-28000, false));
+  for(int i=0;i<16000;++i) assert(!beeped.push(i%2?3000:-3000));
+  assert(beeped.hasSpeech() && beeped.start()==0);
+  CommandCapture beep_only(buffer.data(),500,1000);
+  for(int i=0;i<2880;++i) assert(!beep_only.push(i%2?28000:-28000, false));
+  assert(!beep_only.hasSpeech());
   std::cout << "DSP OK: amplitude=" << amplitude << " residual=" << residual << " alias=" << std::sqrt(alias/n) << '\n';
 }
 ''')
