@@ -35,4 +35,4 @@ spec:
       emptyDir: {}
   params:
     - name: image
-      value: ghcr.io/pgielniak/open-lexa:0.4.0-dual
+      value: ghcr.io/pgielniak/open-lexa:radio-20261112a
