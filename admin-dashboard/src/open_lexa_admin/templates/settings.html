@@ -129,6 +129,26 @@
         <input type="text" id="spotify_market" name="spotify_market" value="{{ sonos.spotify_market }}"></div>
     </div>
   </fieldset>
+  <fieldset{% if not sonos.enabled %} disabled{% endif %} class="sonos-fields">
+    <legend>Komunikaty głosowe na Sonos</legend>
+    <p class="muted" style="margin:0 0 8px">Po wybraniu narzędzia przez LLM, a przed jego wykonaniem, głośnik odtwarza krótką frazę (TTS, klucz <span class="mono">OPENAI_API_KEY</span> receivera). Gdy polecenie nie zostanie zrozumiane, odtwarza frazę „nie zrozumiano”. Pliki są cache'owane w <span class="mono">_clips/</span> na SMB. Puste pole wyłącza komunikat dla danego narzędzia.</p>
+    <input type="hidden" name="announce_present" value="1">
+    <label class="inline"><input type="checkbox" name="announce_enabled" value="1"{% if sonos.announce_enabled %} checked{% endif %}> włącz komunikaty</label>
+    <div class="row" style="margin-top:10px">
+      <div style="flex-basis:260px"><label for="announce_base_url">Adres serwera klipów widoczny dla głośnika</label>
+        <input type="text" id="announce_base_url" name="announce_base_url" value="{{ sonos.announce_base_url }}" placeholder="http://192.168.1.10:8081"></div>
+      <div style="flex:0 1 180px"><label for="announce_model">Model TTS</label>
+        <input type="text" id="announce_model" name="announce_model" value="{{ sonos.announce_model }}"></div>
+      <div style="flex:0 1 140px"><label for="announce_voice">Głos</label>
+        <input type="text" id="announce_voice" name="announce_voice" value="{{ sonos.announce_voice }}"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      {% for phrase in announce_phrases %}
+      <div style="flex-basis:240px"><label for="phrase_{{ phrase.key }}">{{ phrase.label }} <span class="mono muted">{{ phrase.key }}</span></label>
+        <input type="text" id="phrase_{{ phrase.key }}" name="phrase_{{ phrase.key }}" value="{{ phrase.value }}" placeholder="{{ phrase.default }}"></div>
+      {% endfor %}
+    </div>
+  </fieldset>
   <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
     <button class="primary">Zapisz</button>
     <button type="button" id="sonos-test">Test głośnika</button>

@@ -83,7 +83,28 @@ def test_old_recordings_migrate_without_losing_annotations(tmp_path):
     assert conn.execute('SELECT intent_id FROM recordings').fetchone()[0] == 1
     assert db.export_dataset(conn)[0]['corrected_transcript'] == 'poprawiony'
     assert db.annotation_of(db.get_recording(conn, 1))['reviewed_at'] == '2026-11-02'
-    assert conn.execute('PRAGMA user_version').fetchone()[0] == 5
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == 6
+    conn.close()
+
+
+def test_migration_auto_labels_pending_dual_recordings(tmp_path):
+    path = tmp_path / 'v5.sqlite3'
+    conn = db.open_db(path)
+    dual = json.dumps({'local': {'text': 'włącz światło'}, 'cloud': {'text': 'Włącz światło.'}})
+    failed = json.dumps({'local': {'text': 'włącz'}, 'cloud': {'text': None, 'error': 'timeout'}})
+    with conn:
+        for rid, transcripts, status in ((1, dual, 'new'), (2, failed, 'new'), (3, dual, 'skipped'),
+                                         (4, None, 'new')):
+            conn.execute("INSERT INTO recordings (id, stem, audio_path, recorded_at, status, transcripts, "
+                         "ingested_at) VALUES (?, ?, 'x.wav', '2026-11-02', ?, ?, '2026-11-02')",
+                         (rid, f's{rid}', status, transcripts))
+        conn.execute('PRAGMA user_version = 5')
+    conn.close()
+    conn = db.open_db(path)
+    rows = {r['id']: r for r in db.list_recordings(conn)}
+    assert rows[1]['status'] == 'labeled' and rows[1]['corrected_transcript'] == 'Włącz światło.'
+    assert rows[1]['corrected_source'] == 'cloud' and rows[1]['labeled_at']
+    assert [rows[i]['status'] for i in (2, 3, 4)] == ['new', 'skipped', 'new']
     conn.close()
 
 
@@ -130,6 +151,19 @@ def test_ingest_uses_gpt_as_corrected_and_keeps_both_transcripts(conn, tmp_path)
     transcripts = db.transcript_map(row['transcripts'])
     assert transcripts['local']['model'] == 'whisper-1'
     assert transcripts['cloud']['text'] == 'Włącz światło.'
+    # Local + GPT: the GPT transcript is the label, nothing left to review.
+    assert row['status'] == 'labeled' and row['labeled_at']
+    assert db.counts(conn) == {'new': 0, 'labeled': 1, 'skipped': 0}
+
+
+def test_ingest_leaves_dual_recording_for_review_when_gpt_failed(conn, tmp_path):
+    put_recording(
+        tmp_path, '1-0000000a', 'włącz światło', backend='dual',
+        transcripts={'local': {'backend': 'http', 'text': 'włącz światło'},
+                     'cloud': {'backend': 'openai', 'text': None, 'error': 'timeout'}})
+    db.ingest(conn, DirStore(tmp_path))
+    row = db.list_recordings(conn)[0]
+    assert row['status'] == 'new' and row['labeled_at'] is None
 
 
 def test_export_keeps_both_transcripts_in_the_dataset(conn, tmp_path):

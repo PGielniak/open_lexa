@@ -51,9 +51,26 @@ def open_db(path: str | Path) -> sqlite3.Connection:
                 conn.execute(f'ALTER TABLE recordings ADD COLUMN {name} TEXT')
         conn.execute('CREATE INDEX IF NOT EXISTS recordings_status ON recordings (status, recorded_at)')
         version = conn.execute('PRAGMA user_version').fetchone()[0]
-        if version < 5:
-            conn.execute('PRAGMA user_version = 5')
+        if version < 6:
+            # Local + GPT (dual) recordings use the GPT transcript as the
+            # correct one, so pending ones need no human review.
+            for row in conn.execute("SELECT id, transcripts FROM recordings WHERE status = 'new'").fetchall():
+                cloud = auto_label_text(transcript_map(row['transcripts']))
+                if cloud is not None:
+                    conn.execute("UPDATE recordings SET status = 'labeled', labeled_at = ?, "
+                                 "corrected_transcript = ?, corrected_source = 'cloud' WHERE id = ?",
+                                 (utcnow(), cloud, row['id']))
+            conn.execute('PRAGMA user_version = 6')
     return conn
+
+
+def auto_label_text(transcripts: dict) -> str | None:
+    """GPT transcript of a local + GPT (dual) recording, or None when a human must label it."""
+    local, cloud = transcripts.get('local'), transcripts.get('cloud')
+    if not isinstance(local, dict) or not isinstance(cloud, dict) or cloud.get('error'):
+        return None
+    text = cloud.get('text')
+    return text if isinstance(text, str) else None
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> dict | None:
@@ -97,20 +114,25 @@ def insert_recording(conn: sqlite3.Connection, stem: str, audio_path: str, meta:
     source = meta.get('corrected_source')
     if source is None and transcripts:
         source = 'cloud' if 'text' in cloud else 'local' if 'text' in local else None
+    status, labeled_at = 'new', None
+    auto = auto_label_text(transcripts)
+    if auto is not None:
+        status, labeled_at, corrected, source = 'labeled', utcnow(), auto, 'cloud'
     with conn:
         conn.execute('''INSERT OR IGNORE INTO recordings
             (stem, audio_path, recorded_at, duration_seconds, session, stt_backend, stt_model,
              language, original_transcript, stt_error, predicted_intent, predicted_entities,
              predicted_score, predicted_source, corrected_transcript, origin, transcripts,
-             corrected_source, agent, ingested_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             corrected_source, agent, ingested_at, status, labeled_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (stem, audio_path, meta.get('created') or utcnow(), meta.get('duration_seconds'),
              meta.get('session'), meta.get('backend'), meta.get('model'), meta.get('language'),
              original, meta.get('error'), meta.get('intent', meta.get('command')),
              json.dumps(meta['entities'], ensure_ascii=False) if meta.get('entities') is not None else None,
              meta.get('score'), meta.get('source'), corrected, meta.get('origin'),
              json.dumps(transcripts, ensure_ascii=False) if transcripts else None, source,
-             json.dumps(meta['agent'], ensure_ascii=False) if meta.get('agent') else None, utcnow()))
+             json.dumps(meta['agent'], ensure_ascii=False) if meta.get('agent') else None, utcnow(),
+             status, labeled_at))
 
 
 def ingest(conn, store, *, full: bool = True) -> int:

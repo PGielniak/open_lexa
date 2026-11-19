@@ -29,6 +29,6 @@ open-lexa-admin = { workspace = true }
 open-lexa-whisper-api = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["udp-receiver/tests", "admin-dashboard/tests", "whisper-api/tests", "firmware/tests"]
+testpaths = ["udp-receiver/tests", "admin-dashboard/tests", "whisper-api/tests", "hailo-llm/tests", "firmware/tests"]
 # Test modules are imported by basename (test_commands_archive imports test_server),
 # so test file names must stay unique across components.

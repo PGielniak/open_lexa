@@ -1,0 +1,18 @@
+# Reachable only inside the tailnet: https://hailo-chat.<tailnet>.ts.net
+# (Open WebUI's own login on top; secret key in Secret open-webui).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-webui
+  labels:
+    app.kubernetes.io/name: open-webui
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: open-webui
+      port:
+        name: http
+  tls:
+    - hosts:
+        - hailo-chat

@@ -1,0 +1,18 @@
+# Tailnet-only API: https://hailo-llm.<tailnet>.ts.net  (Ollama API + /v1 OpenAI API).
+# No authentication of its own: access is controlled by your Tailscale ACLs.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: open-lexa-llm
+  labels:
+    app.kubernetes.io/name: open-lexa-llm
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: open-lexa-llm
+      port:
+        name: http
+  tls:
+    - hosts:
+        - hailo-llm

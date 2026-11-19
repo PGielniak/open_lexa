@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-webui-config
+  labels:
+    app.kubernetes.io/name: open-webui
+data:
+  OLLAMA_BASE_URL: http://open-lexa-llm.open-lexa.svc.cluster.local:8000
+  ENABLE_OPENAI_API: "false"
+  # The first account created becomes admin; later sign-ups stay "pending"
+  # until the admin approves them. Create yours right after the first rollout.
+  WEBUI_AUTH: "true"
+  DEFAULT_USER_ROLE: pending
+  # The Hailo-10H serves one request at a time (~5 tok/s, 2048-token context):
+  # keep Open WebUI from firing extra background generations at it.
+  ENABLE_TITLE_GENERATION: "false"
+  ENABLE_TAGS_GENERATION: "false"
+  ENABLE_FOLLOW_UP_GENERATION: "false"
+  ENABLE_AUTOCOMPLETE_GENERATION: "false"
+  ENABLE_SEARCH_QUERY_GENERATION: "false"
+  ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+  ANONYMIZED_TELEMETRY: "false"
+  SCARF_NO_ANALYTICS: "true"
+  DO_NOT_TRACK: "true"

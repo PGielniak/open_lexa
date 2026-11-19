@@ -8,19 +8,42 @@ from types import SimpleNamespace
 
 from jsonschema import Draft202012Validator
 
+from .announce import FAILED, NOT_UNDERSTOOD
+
 LOG = logging.getLogger('open_lexa.tool_agent')
 SYSTEM = ('Jesteś polskim asystentem głosowym. Użyj dostępnego narzędzia tylko, '
           'gdy wypowiedź jednoznacznie o to prosi. Dla szumu, rozmowy w tle lub '
           'nieobsługiwanej prośby nie wywołuj narzędzia. Nie wymyślaj parametrów.')
 
 
-def process(text, llm, dispatcher, *, session=None, stem=None):
-    """Make one bounded tool-calling request. Never fall back to regex or NLU."""
+
+def _announce(announce, key, session, error=None):
+    """Spoken confirmation or error; announcer failures never block the tool."""
+    if announce is None:
+        return
+    try:
+        if error is None:
+            announce(key, session=session)
+        else:
+            announce(key, session=session, error=error)
+    except Exception:
+        LOG.warning('announce_error session=%s key=%s', session or '-', key, exc_info=True)
+
+
+def process(text, llm, dispatcher, *, session=None, stem=None, announce=None):
+    """Make one bounded tool-calling request. Never fall back to regex or NLU.
+
+    ``announce(key, session=...)`` is called with the tool name after the call
+    was validated and before it runs, with ``'not_understood'`` when the LLM
+    chose no tool, and with ``'failed'`` (plus ``error=``) when the LLM request,
+    the tool call validation or the tool itself failed or was skipped.
+    """
     if not text or not text.strip():
         LOG.info('agent_result session=%s status=empty', session or '-')
         return {'status': 'empty', 'executions': []}
     if llm is None:
         LOG.warning('agent_result session=%s status=unavailable', session or '-')
+        _announce(announce, FAILED, session, error='LLM is not configured')
         return {'status': 'unavailable', 'error': 'LLM is not configured', 'executions': []}
     discovery_started = time.monotonic()
     tools = dispatcher.list_tools() if dispatcher else []
@@ -53,6 +76,7 @@ def process(text, llm, dispatcher, *, session=None, stem=None):
             raise ValueError('LLM returned more than one tool call')
         if not calls:
             LOG.info('agent_result session=%s status=no_tool', session or '-')
+            _announce(announce, NOT_UNDERSTOOD, session)
             return {'status': 'no_tool', 'reply': getattr(message, 'content', None), 'executions': []}
         call = calls[0]
         name = call.function.name
@@ -64,11 +88,16 @@ def process(text, llm, dispatcher, *, session=None, stem=None):
         Draft202012Validator.check_schema(dict(by_name[name].input_schema))
         Draft202012Validator(dict(by_name[name].input_schema)).validate(arguments)
         decision = SimpleNamespace(tool=name, command=name, arguments=arguments, source='llm')
+        _announce(announce, name, session)
         execution = dispatcher.dispatch(decision, text=text, session=session, stem=stem)
         if execution is None:
             raise ValueError(f'MCP tool {name!r} is no longer available')
+        if execution['status'] != 'handled':
+            _announce(announce, FAILED, session,
+                      error=execution.get('error') or f"tool {name} {execution['status']}")
         return {'status': execution['status'], 'executions': [execution]}
     except Exception as exc:
         llm.stats['failures'] += 1
         LOG.exception('agent_result session=%s status=failed', session or '-')
+        _announce(announce, FAILED, session, error=str(exc))
         return {'status': 'failed', 'error': str(exc)[:500], 'executions': []}

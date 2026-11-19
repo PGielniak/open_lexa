@@ -1,0 +1,41 @@
+# Create (not apply) this manifest for each build; generateName makes every
+# run unique and visible in Tekton Dashboard:
+#
+#   kubectl --context default -n tekton-builds create -f hailo-llm/build/pipelinerun.yaml
+#
+# Refresh the open-lexa-hailo-llm-context ConfigMap first when sources changed (see
+# pipeline.yaml). After a successful run, pin the IMAGE_DIGEST result in
+# hailo-llm/deploy/kustomization.yaml.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: open-lexa-hailo-llm-build-
+  namespace: tekton-builds
+  labels:
+    app.kubernetes.io/name: open-lexa
+    app.kubernetes.io/component: hailo-llm-build-run
+spec:
+  pipelineRef:
+    name: open-lexa-hailo-llm-build
+  taskRunTemplate:
+    podTemplate:
+      # Kaniko cannot cross-build and the amd64 build host has no ARM64 binfmt.
+      # HailoRT and the hailo-ollama binary are ARM64.
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        # raspberry01/02 root fs is nearly full
+        # (ephemeral-storage evictions); raspberry03 has ~35 GB.
+        kubernetes.io/hostname: raspberry03
+      # Build pods do not need Kubernetes API credentials.
+      automountServiceAccountToken: false
+  timeouts:
+    pipeline: 30m
+  workspaces:
+    - name: source
+      configMap:
+        name: open-lexa-hailo-llm-context
+    - name: build
+      emptyDir: {}
+  params:
+    - name: image
+      value: ghcr.io/pgielniak/open-lexa-hailo-llm:5.5.0-gemma4-tools2

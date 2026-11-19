@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-lexa-llm
+  labels:
+    app.kubernetes.io/name: open-lexa-llm
+    app.kubernetes.io/component: llm
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  # One Hailo-10H: the old pod must release it before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-lexa-llm
+      app.kubernetes.io/component: llm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-lexa-llm
+        app.kubernetes.io/component: llm
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # raspberry02 is not labelled homelab.pgielnia.cc/hailo10h on purpose, so
+      # open-lexa-whisper (which selects that label) never lands here.
+      nodeSelector:
+        kubernetes.io/hostname: raspberry02
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: hailo-ollama
+          image: open-lexa-hailo-llm
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 6
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 256Mi
+              hailo.ai/h10h: 1
+            limits:
+              cpu: "4"
+              memory: 3Gi
+              hailo.ai/h10h: 1
+          volumeMounts:
+            - name: models
+              mountPath: /data/.local/share/hailo-ollama
+            - name: tmp
+              mountPath: /tmp
+        # Turns Gemma4's raw tool-call text into OpenAI/Ollama `tool_calls`.
+        # The Service targets this port; hailo-ollama stays on localhost:8000.
+        - name: tool-adapter
+          image: open-lexa-hailo-llm
+          imagePullPolicy: IfNotPresent
+          command: [python3, -u, /opt/adapter/gemma_tool_adapter.py]
+          env:
+            - name: UPSTREAM
+              value: 127.0.0.1:8000
+            - name: ADAPTER_PORT
+              value: "8001"
+          ports:
+            - name: tools
+              containerPort: 8001
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: tools
+            periodSeconds: 10
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      volumes:
+        # Model cache (~3.3 GB Gemma4-E2B) on the node's SD card; kept out of the
+        # image because raspberry02 only has a few GB free. If empty, pull once:
+        #   curl -H 'Content-Type: application/json' \
+        #     http://open-lexa-llm:8000/api/pull -d '{"model":"gemma4:e2b"}'
+        - name: models
+          hostPath:
+            path: /home/patryk/.local/share/hailo-ollama
+            type: Directory
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

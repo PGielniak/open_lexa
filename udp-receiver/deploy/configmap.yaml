@@ -9,6 +9,9 @@ data:
   OPEN_LEXA_BIND: "0.0.0.0"
   OPEN_LEXA_PORT: "12345"
   OPEN_LEXA_HEALTH_PORT: "8080"
+  # Announcement clips for Sonos (Service open-lexa-clips); 0 disables them.
+  # TTS uses OPENAI_API_KEY/OPENAI_BASE_URL (override: TTS_API_KEY/TTS_URL).
+  OPEN_LEXA_CLIP_PORT: "8081"
   # dual: every recording goes to the local Whisper API and cloud GPT
   # transcribe in parallel. The GPT text is stored as the automatically
   # corrected transcript and is preferred for command handling. Set

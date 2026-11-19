@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# hailo-ollama + Gemma4-E2B on raspberry02:  kubectl apply -k hailo-llm/deploy
+# Also needs the node label  hailo.ai/device=hailo10h  so the Hailo device plugin
+# DaemonSet runs there and advertises hailo.ai/h10h.
+namespace: open-lexa
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+images:
+  - name: open-lexa-hailo-llm
+    newName: ghcr.io/pgielniak/open-lexa-hailo-llm
+    newTag: 5.5.0-gemma4-tools2
+    # Built by Tekton PipelineRun open-lexa-hailo-llm-build-nzcxq.
+    digest: sha256:7488acadf4f0fe36742b00c334d18e1d422c7cdd3e621195576a9c7a89f3cacb

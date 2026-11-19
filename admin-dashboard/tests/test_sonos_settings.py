@@ -78,3 +78,35 @@ def test_sonos_config_and_authenticated_controls(tmp_path, monkeypatch):
         conn = db.connect(app.state.worker.db_path)
         assert db.get_setting(conn, 'handlers')['sonos']['speaker_ip'] == '192.168.1.22'
         conn.close()
+
+
+def test_sonos_announcement_settings_round_trip(tmp_path):
+    archive = tmp_path / 'archive'
+    app = create_app(db_path=str(tmp_path / 'labels.sqlite3'), store=DirStore(archive),
+                     username='admin', password='correct-horse-battery', background=False)
+    base = {'enabled': '1', 'speaker_ip': '192.168.1.22'}
+    with TestClient(app) as client:
+        page = client.get('/settings', headers=AUTH).text
+        assert 'Okej, uruchamiam Spotify.' in page and 'phrase_not_understood' in page
+        response = client.post('/settings/sonos', headers=AUTH, follow_redirects=False, data={
+            **base, 'announce_present': '1', 'announce_enabled': '1', 'announce_base_url': ''})
+        assert 'error=' in response.headers['location']
+        client.post('/settings/sonos', headers=AUTH, data={
+            **base, 'announce_present': '1', 'announce_enabled': '1',
+            'announce_base_url': 'http://192.168.1.10:8081/', 'announce_voice': 'shimmer',
+            'phrase_play_spotify': '  Jasne,  włączam Spotify ', 'phrase_pause': ''})
+        app.state.worker.export()
+        announce = json.loads((archive / '_config' / 'handlers.json').read_text())['sonos']['announce']
+        assert announce['enabled'] is True
+        assert announce['base_url'] == 'http://192.168.1.10:8081'
+        assert announce['voice'] == 'shimmer' and announce['model'] == 'gpt-4o-mini-tts'
+        assert announce['phrases']['play_spotify'] == 'Jasne, włączam Spotify'
+        assert announce['phrases']['pause'] == ''
+        assert announce['phrases']['not_understood'] == 'Sorry, nie zrozumiałam.'
+        # Sonos switched off: the disabled fieldset submits nothing, settings survive.
+        client.post('/settings/sonos', headers=AUTH, data={})
+        conn = db.connect(app.state.worker.db_path)
+        kept = db.get_setting(conn, 'handlers')['sonos']['announce']
+        conn.close()
+        assert kept['enabled'] is True and kept['phrases']['play_spotify'] == 'Jasne, włączam Spotify'
+        assert 'Jasne, włączam Spotify' in client.get('/settings', headers=AUTH).text

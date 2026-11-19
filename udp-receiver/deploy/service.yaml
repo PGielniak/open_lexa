@@ -34,3 +34,23 @@ spec:
     - name: health
       port: 8080
       targetPort: health
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-lexa-clips
+  labels:
+    app.kubernetes.io/name: open-lexa
+spec:
+  # Announcement clips ("okej, uruchamiam Spotify") fetched by the Sonos
+  # speaker. Like the UDP Service, ServiceLB binds 8081 on every node, so set
+  # Ustawienia -> Sonos -> Komunikaty to http://<any node LAN IPv4>:8081.
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/name: open-lexa
+  ports:
+    - name: clips
+      port: 8081
+      targetPort: clips
+      protocol: TCP

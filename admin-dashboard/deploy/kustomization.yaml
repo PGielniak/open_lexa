@@ -12,6 +12,6 @@ resources:
 images:
   - name: open-lexa-admin
     newName: ghcr.io/pgielniak/open-lexa-admin
-    newTag: radio-20261112a
+    newTag: nierozumiem
     # Built by Tekton PipelineRun open-lexa-admin-build-8xtnv.
-    digest: sha256:355f451c31dc8da6cd5dfebf6425c3ff5c9e0241a819e2b8aebaa3662339c52e
+    # digest: sha256:355f451c31dc8da6cd5dfebf6425c3ff5c9e0241a819e2b8aebaa3662339c52e

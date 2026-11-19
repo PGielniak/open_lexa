@@ -27,6 +27,8 @@ from open_lexa.audio import wav_bytes
 from open_lexa.handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH
 from open_lexa.handlers import discover as discover_handlers
 from open_lexa.llm import SETTINGS_PATH as LLM_SETTINGS_PATH
+from open_lexa.announce import (DEFAULT_MODEL as DEFAULT_TTS_MODEL, DEFAULT_VOICE as DEFAULT_TTS_VOICE,
+                                PHRASES as ANNOUNCE_PHRASES, phrases_from)
 from open_lexa.protocol import MAX_BYTES, RATE
 from open_lexa.store import Store, create_store, missing
 from open_lexa.stt import (ConfigError, Transcriber, format_errors, preferred_result,
@@ -46,7 +48,9 @@ ORIGINS = ('browser', 'upload')
 SONOS_DEFAULTS = {'enabled': '', 'speaker_ip': '', 'default_favorite': '', 'default_radio': '',
                   'radio_stations': '', 'volume_step': '5',
                   'volume_max': '60', 'timeout': '5', 'spotify_client_id': '',
-                  'spotify_client_secret': '', 'spotify_market': 'PL'}
+                  'spotify_client_secret': '', 'spotify_market': 'PL',
+                  'announce_enabled': '', 'announce_base_url': '',
+                  'announce_model': DEFAULT_TTS_MODEL, 'announce_voice': DEFAULT_TTS_VOICE}
 
 
 class Worker:
@@ -321,16 +325,26 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         handlers_stored = db.get_setting(conn, 'handlers') or {}
         sonos_stored = handlers_stored.get('sonos') or {}
         spotify_stored = sonos_stored.get('spotify') or {}
+        announce_stored = sonos_stored.get('announce') or {}
         sonos = {**SONOS_DEFAULTS,
-                 **{k: v for k, v in sonos_stored.items() if k != 'spotify'},
+                 **{k: v for k, v in sonos_stored.items() if k not in ('spotify', 'announce')},
                  'enabled': '1' if sonos_stored.get('enabled') else '',
                  'spotify_client_id': spotify_stored.get('client_id', ''),
-                 'spotify_market': spotify_stored.get('market', 'PL')}
+                 'spotify_market': spotify_stored.get('market', 'PL'),
+                 'announce_enabled': '1' if announce_stored.get('enabled') else '',
+                 'announce_base_url': announce_stored.get('base_url', ''),
+                 'announce_model': announce_stored.get('model') or DEFAULT_TTS_MODEL,
+                 'announce_voice': announce_stored.get('voice') or DEFAULT_TTS_VOICE}
+        phrases = phrases_from(announce_stored.get('phrases'))
+        announce_phrases = [{'key': key, 'label': label, 'default': default,
+                             'value': phrases.get(key, '')}
+                            for key, label, default in ANNOUNCE_PHRASES]
         spotify_secret = str(spotify_stored.get('client_secret') or '')
         return render(request, 'settings.html', s=current, stored=stored is not None,
                       key_hint=f'…{key[-4:]}' if len(key) >= 12 else ('ustawiony' if key else ''),
                       llm=llm_current, llm_stored=llm_stored is not None, llm_key_hint=mask_key(llm_key),
                       sonos=sonos, sonos_stored=bool(handlers_stored),
+                      announce_phrases=announce_phrases,
                       spotify_secret_hint=mask_key(spotify_secret),
                        plugins=[{'id': h.id, 'version': h.version, 'intents': sorted(h.intents),
                                 'enabled': bool(handlers_stored.get(h.id, {}).get('enabled'))}
@@ -439,6 +453,8 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
         handlers = db.get_setting(conn, 'handlers') or {}
         sonos_stored = handlers.get('sonos') or {}
         spotify_stored = sonos_stored.get('spotify') or {}
+        announce_stored = sonos_stored.get('announce') or {}
+        phrases_stored = phrases_from(announce_stored.get('phrases'))
         def field(name: str, previous: dict, key: str | None = None) -> str:
             # A disabled fieldset omits fields; an explicitly emptied field
             # must clear the old value (not silently restore it).
@@ -461,10 +477,25 @@ def create_app(*, db_path: str, store: Store, username: str, password: str,
                                   or spotify_stored.get('client_secret', '')),
                 'market': (form.get('spotify_market') or spotify_stored.get('market') or 'PL').strip(),
             },
+            'announce': {
+                # A disabled fieldset omits the marker too: keep the stored flag then.
+                'enabled': (bool(form.get('announce_enabled')) if form.get('announce_present')
+                            else bool(announce_stored.get('enabled'))),
+                'base_url': field('announce_base_url', announce_stored, 'base_url').rstrip('/'),
+                'model': field('announce_model', announce_stored, 'model') or DEFAULT_TTS_MODEL,
+                'voice': field('announce_voice', announce_stored, 'voice') or DEFAULT_TTS_VOICE,
+                'phrases': {key: ' '.join(field(f'phrase_{key}', phrases_stored, key).split())
+                            for key, _, _ in ANNOUNCE_PHRASES},
+            },
         }
         if sonos['enabled'] and not sonos['speaker_ip']:
             return RedirectResponse('/settings?' + urlencode(
                 {'error': 'Sonos: podaj adres IP głośnika albo wyłącz handler'}),
+                http.HTTP_303_SEE_OTHER)
+        if sonos['enabled'] and sonos['announce']['enabled'] and not sonos['announce']['base_url'].startswith(
+                ('http://', 'https://')):
+            return RedirectResponse('/settings?' + urlencode(
+                {'error': 'Komunikaty: podaj adres http://IP-noda:8081, który widzi głośnik'}),
                 http.HTTP_303_SEE_OTHER)
         for key in ('volume_step', 'volume_max', 'timeout'):
             if not sonos[key].isdigit():

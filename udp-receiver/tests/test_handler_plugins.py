@@ -483,8 +483,17 @@ def test_tunein_matching_and_play_uri(monkeypatch):
     played = []
 
     class Coordinator:
+        def __init__(self):
+            self.avTransport = SimpleNamespace(AddURIToQueue=lambda args: played.append(('enqueue', dict(args))))
+
         def play_uri(self, uri, meta='', **kwargs):
             played.append((uri, meta, kwargs))
+
+        def clear_queue(self):
+            played.append(('clear',))
+
+        def play_from_queue(self, index):
+            played.append(('play_from_queue', index))
 
     speaker = SonosSpeaker('192.168.0.2')
     monkeypatch.setattr(SonosSpeaker, 'coordinator', property(lambda self: Coordinator()))
@@ -495,4 +504,9 @@ def test_tunein_matching_and_play_uri(monkeypatch):
     assert 'F00092020s15990' in played[0][1] and 'Radio &lt;Zet&gt;' in played[0][1]
     assert played[0][2] == {'timeout': 20.0}
     assert played[1] == ('x-sonosapi-stream:s1', '<DIDL/>', {'timeout': 20.0})
-    assert played[2] == ('x-rincon-cpcontainer:abc', '<DIDL/>', {})
+    # A playlist favorite cannot be set as the transport URI (UPnP 714): queue it.
+    assert played[2] == ('clear',)
+    assert played[3][0] == 'enqueue' and played[3][1]['EnqueuedURI'] == 'x-rincon-cpcontainer:abc'
+    assert played[3][1]['EnqueuedURIMetaData'] == '<DIDL/>'
+    assert played[4] == ('play_from_queue', 0)
+    assert len(played) == 5

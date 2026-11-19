@@ -33,7 +33,10 @@ serwerem należy sprawdzić w danym wdrożeniu.
 
 Podaj adres IP głośnika i ustaw `default_favorite` na nazwę osobistej playlisty
 w Ulubionych Sonos. Polecenie „włącz Spotify” lub „włącz muzykę” odtworzy ją;
-bez niej jest pomijane. Spotify musi być połączone w aplikacji Sonos.
+bez niej jest pomijane. Ulubione będące playlistą lub albumem
+(`x-rincon-cpcontainer:`) zastępują kolejkę i grają od pierwszego utworu —
+Sonos odrzuca je jako bezpośrednie źródło (UPnP 714 „Illegal MIME-Type”).
+Spotify musi być połączone w aplikacji Sonos.
 Wyszukiwanie katalogu po nazwie wymaga dodatkowo Spotify Client ID i Secret.
 Obsługiwane są odtwarzanie i kolejka, pauza/wznowienie, następny/poprzedni
 utwór oraz głośność ograniczona przez `volume_max`.
@@ -50,6 +53,47 @@ Wyszukiwanie TuneIn nie wymaga klucza. Akceptowane jest tylko dokładne lub
 zawierające się dopasowanie nazwy, więc stację, której TuneIn nie zna (np.
 Trójkę), dodaj do Ulubionych Sonos pod nazwą, którą wypowiadasz. Sonos
 przekierowuje odtwarzanie na konto TuneIn połączone w aplikacji Sonos.
+
+## Komunikaty głosowe na Sonos
+
+Gdy LLM wybierze narzędzie, receiver najpierw odtwarza na głośniku krótką frazę
+(np. „Okej, uruchamiam Spotify.”), a dopiero potem wykonuje akcję MCP. Gdy LLM
+nie wybierze narzędzia, odtwarza „Sorry, nie zrozumiałam.”. Gdy STT, zapytanie do
+LLM, walidacja wywołania albo samo narzędzie się nie powiedzie (status `failed`
+lub `skipped`), odtwarza frazę `failed` — domyślnie „Przepraszam, coś poszło
+nie tak, spróbuj ponownie.”. Fraza może zawierać `{error}`, np. „Przepraszam,
+błąd: {error}” — zostanie on zastąpiony treścią błędu (max 160 znaków); takie
+klipy są syntetyzowane przy każdym nowym błędzie i trzymane tylko w pamięci
+(ostatnie 16), bez zapisu na SMB. Pusta transkrypcja (szum, fałszywe wybudzenie) nie wywołuje
+komunikatu. Błąd TTS albo głośnika jest logowany (`announce_failed`) i nigdy nie
+blokuje samej akcji.
+
+Konfiguracja: **Ustawienia → Sonos / Spotify → Komunikaty głosowe**, zapisywana
+w `_config/handlers.json` jako `sonos.announce`:
+
+```json
+{"sonos": {"enabled": true, "speaker_ip": "192.168.1.42",
+           "announce": {"enabled": true, "base_url": "http://192.168.1.10:8081",
+                        "model": "gpt-4o-mini-tts", "voice": "nova",
+                        "phrases": {"play_spotify": "Okej, uruchamiam Spotify.",
+                                    "pause": "", "not_understood": "Sorry, nie zrozumiałam."}}}}
+```
+
+- Frazy są syntetyzowane raz przez `audio/speech` (klucz `OPENAI_API_KEY`
+  receivera, opcjonalnie `TTS_API_KEY`/`TTS_URL`), cache'owane w pamięci i w
+  `_clips/<hash>.mp3` na SMB. Hash obejmuje tekst, model i głos, więc zmiana
+  frazy generuje nowy plik.
+- Sonos pobiera klip sam, przez HTTP. Receiver serwuje `/clips/` na porcie
+  `OPEN_LEXA_CLIP_PORT` (8081); Service `open-lexa-clips` (ServiceLB) wystawia
+  go na każdym nodzie. `base_url` to `http://<LAN IP dowolnego noda>:8081` —
+  ten sam adres, którego używa ESP32.
+- Przed klipem zapisywany jest snapshot (SoCo). Po klipie: narzędzia
+  uruchamiające odtwarzanie (`play_*`) nie przywracają poprzedniego źródła;
+  `pause`/`stop` przywracają źródło i pozycję bez wznawiania; pozostałe
+  (głośność, następny/poprzedni, kolejka, „nie zrozumiałam”) przywracają
+  wszystko. Źródeł, których snapshot nie umie wznowić (Spotify Connect,
+  AirPlay, TV, line-in), komunikat nie przerywa — jest wtedy pomijany.
+- Komunikat zatrzymuje muzykę na czas trwania frazy (~1–2 s).
 
 ## Dane i migracja
 

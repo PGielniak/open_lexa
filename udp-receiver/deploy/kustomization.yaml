@@ -11,7 +11,7 @@ resources:
 images:
   - name: open-lexa
     newName: ghcr.io/pgielniak/open-lexa
-    newTag: radio-20261112a
+    newTag: nierozumiem
     # Built by Tekton PipelineRun open-lexa-receiver-build-qrwcw.
     # Pinning the digest keeps rollouts reproducible even if the tag moves.
-    digest: sha256:8191a442685dad2870edba2798ee322a4fd07f708f42de41fd568446b1fdc9c9
+    # digest: sha256:8191a442685dad2870edba2798ee322a4fd07f708f42de41fd568446b1fdc9c9

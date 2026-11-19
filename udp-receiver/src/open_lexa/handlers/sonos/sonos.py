@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from xml.sax.saxutils import escape
 
 LOG = logging.getLogger('open_lexa.handlers.sonos')
@@ -18,6 +19,12 @@ LOG = logging.getLogger('open_lexa.handlers.sonos')
 RADIO_URI_PREFIXES = ('x-sonosapi-stream:', 'x-rincon-mp3radio:', 'x-sonosapi-radio:',
                       'aac:', 'hls-radio:')
 TUNEIN_SID = 254
+# Favorites that are playlists/albums rather than playable items.
+CONTAINER_URI_PREFIXES = ('x-rincon-cpcontainer:', 'x-rincon-playlist:', 'file:///jffs/settings/savedqueues')
+# Spotify Connect / AirPlay (x-sonos-vli), TV (htastream) and line-in cannot be
+# restarted from a snapshot; interrupting them for an announcement would end them.
+UNRESTORABLE_URI_PREFIXES = ('x-sonos-vli:', 'x-sonos-htastream:', 'x-rincon-stream:')
+CLIP_POLL_SECONDS = 0.25
 # Play blocks until a radio stream has buffered, often longer than the 5 s
 # request timeout used for other commands.
 STREAM_START_TIMEOUT = 20.0
@@ -102,11 +109,24 @@ class SonosSpeaker:
     def play(self) -> None:
         self._call('play', lambda: self.coordinator.play())
 
+    def _transport_state(self, device) -> str:
+        return str((device.get_current_transport_info() or {}).get('current_transport_state') or '')
+
     def pause(self) -> None:
-        self._call('pause', lambda: self.coordinator.pause())
+        # Sonos rejects pause/stop on a stopped transport (UPnP 701), e.g. after
+        # an announcement restored the previous source without resuming it.
+        def run():
+            coordinator = self.coordinator
+            if self._transport_state(coordinator) in ('PLAYING', 'TRANSITIONING'):
+                coordinator.pause()
+        self._call('pause', run)
 
     def stop(self) -> None:
-        self._call('stop', lambda: self.coordinator.stop())
+        def run():
+            coordinator = self.coordinator
+            if self._transport_state(coordinator) != 'STOPPED':
+                coordinator.stop()
+        self._call('stop', run)
 
     def next(self) -> None:
         self._call('next', lambda: self.coordinator.next())
@@ -180,12 +200,36 @@ class SonosSpeaker:
         self.play_favorite_item(chosen)
         return chosen['title']
 
+    @staticmethod
+    def is_container(favorite: dict) -> bool:
+        """Playlists/albums: Sonos only plays these from the queue. Never radio."""
+        uri = favorite.get('uri') or ''
+        if SonosSpeaker.is_radio(favorite):
+            return False
+        return (uri.startswith(CONTAINER_URI_PREFIXES)
+                or 'object.container' in (favorite.get('meta') or ''))
+
     def play_favorite_item(self, favorite: dict) -> None:
+        if self.is_container(favorite):
+            # SetAVTransportURI on a container fails with UPnP 714 "Illegal
+            # MIME-Type": replace the queue with it and play from the start.
+            self._call('queueing the favorite', self._play_container,
+                       self.coordinator, favorite)
+            return
         timeout = self._start_timeout() if self.is_radio(favorite) else None
         extra = {'timeout': timeout} if timeout else {}
         self._call('playing the favorite',
                    lambda: self.coordinator.play_uri(favorite['uri'], meta=favorite['meta'],
                                                      **extra))
+
+    @staticmethod
+    def _play_container(coordinator, favorite: dict) -> None:
+        coordinator.clear_queue()
+        coordinator.avTransport.AddURIToQueue([
+            ('InstanceID', 0), ('EnqueuedURI', favorite['uri']),
+            ('EnqueuedURIMetaData', favorite.get('meta') or ''),
+            ('DesiredFirstTrackNumberEnqueued', 0), ('EnqueueAsNext', 0)])
+        coordinator.play_from_queue(0)
 
     def _start_timeout(self) -> float:
         return max(float(self.timeout), STREAM_START_TIMEOUT)
@@ -226,6 +270,65 @@ class SonosSpeaker:
     def _add_share_link(coordinator, uri: str, title: str) -> int:
         from soco.plugins.sharelink import ShareLinkPlugin
         return ShareLinkPlugin(coordinator).add_share_link_to_queue(uri, dc_title=title)
+
+    # --- announcements -------------------------------------------------------------
+
+    @staticmethod
+    def restorable(snapshot) -> bool:
+        """False for sources a SoCo snapshot cannot resume (Connect, AirPlay, TV, line-in)."""
+        uri = str(getattr(snapshot, 'media_uri', '') or '')
+        return not (getattr(snapshot, 'is_playing_cloud_queue', False)
+                    or uri.startswith(UNRESTORABLE_URI_PREFIXES))
+
+    def play_clip(self, url: str, title: str, *, after: str = 'full',
+                  max_seconds: float = 10.0) -> bool:
+        """Play a short clip, wait for it to end, then handle the previous playback.
+
+        ``after`` is ``'none'`` (the next command replaces playback), ``'paused'``
+        (restore the source and position without resuming) or ``'full'`` (restore
+        and resume if it was playing). Returns False when the clip was skipped
+        because the current source could not be restored afterwards.
+        """
+        def run() -> bool:
+            from soco.snapshot import Snapshot
+            coordinator = self.coordinator
+            snapshot = None
+            if after != 'none':
+                snapshot = Snapshot(coordinator)
+                snapshot.snapshot()
+                if (snapshot.transport_state in ('PLAYING', 'TRANSITIONING')
+                        and not self.restorable(snapshot)):
+                    LOG.info('sonos_clip_skipped reason=unrestorable_source uri=%s',
+                             str(snapshot.media_uri or '').split('?', 1)[0][:60])
+                    return False
+            try:
+                coordinator.play_uri(url, title=title)
+                self._wait_clip(coordinator, max_seconds)
+            finally:
+                # play_uri replaces the transport URI before it starts playing, so a
+                # clip Sonos cannot fetch must still give the previous music back.
+                if snapshot is not None:
+                    if after == 'paused' and snapshot.transport_state != 'STOPPED':
+                        snapshot.transport_state = 'PAUSED_PLAYBACK'
+                    try:
+                        snapshot.restore()
+                    except Exception:
+                        LOG.warning('sonos_clip_restore_failed', exc_info=True)
+            return True
+        return self._call('playing the announcement', run)
+
+    def _wait_clip(self, coordinator, max_seconds: float) -> None:
+        """Block until the clip stops (it must have started first), capped by ``max_seconds``."""
+        started = time.monotonic()
+        seen_playing = False
+        while time.monotonic() - started < max_seconds:
+            state = self._transport_state(coordinator)
+            if state == 'PLAYING':
+                seen_playing = True
+            elif state != 'TRANSITIONING' and (seen_playing or time.monotonic() - started > 3):
+                return
+            time.sleep(CLIP_POLL_SECONDS)
+        LOG.warning('sonos_clip_timeout seconds=%.1f', max_seconds)
 
     def enqueue_spotify(self, uri: str, title: str = '') -> int:
         """Append a Spotify item without changing the current transport state."""

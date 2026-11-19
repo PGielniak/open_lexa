@@ -18,6 +18,7 @@ from opentelemetry import context as otel_context, trace
 from dotenv import load_dotenv
 
 from .store import create_store
+from .announce import FAILED, Announcer, ClipCache, OpenAITTS, start_clip_server
 from .archive import Archive, create_archive
 from .audio import wav_bytes
 from .handlers import CONFIG_PATH as HANDLERS_CONFIG_PATH, Dispatcher, validate_config
@@ -195,7 +196,8 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
            archive: Archive | None = None, settings: SettingsWatcher | None = None,
            llm_client=None, dispatcher: Dispatcher | None = None,
            handlers_config: JsonWatcher | None = None,
-           llm_config: JsonWatcher | None = None) -> None:
+           llm_config: JsonWatcher | None = None,
+           announcer: Announcer | None = None) -> None:
     writer = ArchiveWriter(archive, state) if archive is not None else None
     applied = 0  # settings.version the current transcriber was built from; 0 = environment
     applied_handlers = 0
@@ -249,6 +251,12 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 applied_handlers = handlers_config.version
                 dispatcher.apply_config(handlers_config.data)
                 state.handlers = dispatcher.summary()
+                if announcer is not None:
+                    try:
+                        announcer.configure((handlers_config.data or {}).get('sonos'))
+                    except Exception:
+                        LOG.exception('Announcement settings rejected; announcements off')
+                        announcer.enabled = False
             if llm_config is not None and llm_config.version != applied_llm:
                 applied_llm = llm_config.version
                 # Same contract as the STT settings file: invalid keeps the
@@ -310,7 +318,8 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
                 try:
                     with tracer.start_as_current_span('llm'):
                         agent_meta = process_tools(text, llm_client, dispatcher,
-                                                   session=session, stem=stem)
+                                                   session=session, stem=stem,
+                                                   announce=announcer)
                 finally:
                     LOG.info('agent_total session=%s duration_ms=%d', session,
                              round((time.monotonic() - agent_started) * 1000))
@@ -336,6 +345,11 @@ def worker(jobs: queue.Queue, transcriber: Transcriber | None, language: str,
             if span is not None:
                 span.set_status(trace.Status(trace.StatusCode.ERROR))
             LOG.exception('Recording processing failed (session %08x)', recording.session)
+            if announcer is not None:
+                try:  # e.g. every STT backend failed: say so instead of staying silent
+                    announcer(FAILED, session=session, error=str(exc))
+                except Exception:
+                    LOG.warning('announce_error session=%s key=%s', session, FAILED, exc_info=True)
         finally:
             if processing_started is not None:
                 LOG.info('processing_total session=%s status=%s duration_ms=%d', session,
@@ -370,6 +384,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--port', type=int, help='UDP port (default: OPEN_LEXA_PORT or 12345)')
     parser.add_argument('--health-port', type=int,
                         help='HTTP health port, 0 disables (default: OPEN_LEXA_HEALTH_PORT or 8080)')
+    parser.add_argument('--clip-port', type=int,
+                        help='HTTP port serving announcement clips to Sonos, 0 disables '
+                             '(default: OPEN_LEXA_CLIP_PORT or 8081)')
     parser.add_argument('--device-ip', help='Only accept packets from this IPv4 address; '
                                             'requires a direct/hostNetwork path (ServiceLB SNATs peers)')
     parser.add_argument('--backend', choices=BACKENDS,
@@ -411,6 +428,8 @@ def main():
     port = args.port if args.port is not None else env_int('OPEN_LEXA_PORT', 12345)
     health_port = (args.health_port if args.health_port is not None
                    else env_int('OPEN_LEXA_HEALTH_PORT', 8080))
+    clip_port = (args.clip_port if args.clip_port is not None
+                 else env_int('OPEN_LEXA_CLIP_PORT', 8081))
     language = args.language or os.environ.get('STT_LANGUAGE', 'pl')
     save_dir = args.save_dir
     if save_dir is None and os.environ.get('OPEN_LEXA_SAVE_DIR'):
@@ -419,6 +438,8 @@ def main():
         parser.error('--port must be between 1 and 65535')
     if not 0 <= health_port <= 65535:
         parser.error('--health-port must be between 0 and 65535')
+    if not 0 <= clip_port <= 65535:
+        parser.error('--clip-port must be between 0 and 65535')
 
     try:
         token = parse_token(os.environ.get('OPEN_LEXA_TOKEN', ''))
@@ -452,12 +473,16 @@ def main():
             llm_client = create_llm(mode=args.llm_mode)
         except LLMConfigError as exc:
             parser.error(str(exc))
-    dispatcher = handlers_config = None
+    dispatcher = handlers_config = announcer = clips = None
     if not args.dry_run:
         dispatcher = Dispatcher()
         if archive is not None and settings_seconds > 0:
             handlers_config = JsonWatcher(create_store(), HANDLERS_CONFIG_PATH,
                                           interval=settings_seconds, validate=validate_config)
+        if handlers_config is not None and clip_port:
+            # Clips are cached on the archive so a restart does not re-run TTS.
+            clips = ClipCache(create_store(), OpenAITTS.from_env())
+            announcer = Announcer(clips)
     if archive is not None and settings_seconds > 0 and not args.backend and not args.model:
         settings = SettingsWatcher(create_store(), lambda: create_transcriber(backend),
                                    interval=settings_seconds)
@@ -498,7 +523,7 @@ def main():
     # Kubernetes sends SIGTERM; treat it like Ctrl-C so queued recordings drain.
     signal.signal(signal.SIGTERM, stop)
 
-    httpd = None
+    httpd = clip_httpd = None
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
         sock.bind((bind, port))
@@ -508,7 +533,7 @@ def main():
             kwargs={'archive': archive, 'settings': settings,
                     'llm_client': llm_client,
                     'dispatcher': dispatcher, 'handlers_config': handlers_config,
-                    'llm_config': llm_config},
+                    'llm_config': llm_config, 'announcer': announcer},
             daemon=True, name='stt')
         thread.start()
         if settings is not None:
@@ -519,6 +544,9 @@ def main():
             llm_config.start()
         if health_port:
             httpd = start_health_server(health_port, state)
+        clip_httpd = start_clip_server(clips, clip_port) if clips is not None else None
+        if clip_httpd is not None:
+            LOG.info('Announcement clips on :%d/clips/', clip_port)
         LOG.info('Listening on %s:%d/UDP; backend=%s; language=%s; archive=%r',
                  bind, port, state.backend, language, archive)
         if health_port:
@@ -557,6 +585,9 @@ def main():
             if httpd is not None:
                 httpd.shutdown()
                 httpd.server_close()
+            if clip_httpd is not None:
+                clip_httpd.shutdown()
+                clip_httpd.server_close()
             if telemetry_provider is not None:
                 telemetry_provider.shutdown()
 

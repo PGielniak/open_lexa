@@ -14,3 +14,7 @@ firmware/src/OpenLexaNano/Config.h
 firmware/.build/
 # Local kustomize overlays with real homelab values (see deploy-local/README.md).
 deploy-local/
+
+# Licensed Hailo binary copied from a Pi node (see hailo-llm/README.md); never commit it.
+hailo-llm/vendor/
+*.sqlite3*

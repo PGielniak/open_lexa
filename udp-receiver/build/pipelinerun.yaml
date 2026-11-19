@@ -35,4 +35,4 @@ spec:
       emptyDir: {}
   params:
     - name: image
-      value: ghcr.io/pgielniak/open-lexa:radio-20261112a
+      value: ghcr.io/pgielniak/open-lexa:nierozumiem
